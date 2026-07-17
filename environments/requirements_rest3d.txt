@@ -38,3 +38,4 @@ pycocotools
 tensorboard
 huggingface_hub
 openai
+ninja

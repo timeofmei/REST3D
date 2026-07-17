@@ -24,3 +24,5 @@ venv/
 
 # Cloned upstream deps (installed editable; large)
 third_party_src/
+
+.env

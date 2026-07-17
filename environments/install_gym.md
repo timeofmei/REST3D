@@ -23,9 +23,24 @@ cd /path/to/isaacgym/python
 pip install -e .
 ```
 
-After every `conda activate gym`, export the following so Isaac Gym can find `libpython3.8.so`:
+For WSL2, configure the environment so Isaac Gym can find both
+`libpython3.8.so` and the WSL NVIDIA driver library:
 ```bash
-export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+mkdir -p $CONDA_PREFIX/etc/conda/activate.d
+vim $CONDA_PREFIX/etc/conda/activate.d/env_vars.sh
+```
+
+Add the following line to `env_vars.sh`:
+
+```bash
+export LD_LIBRARY_PATH="/usr/lib/wsl/lib:$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+```
+
+Then reactivate the environment:
+
+```bash
+conda deactivate
+conda activate gym
 ```
 
 **4. Install Python dependencies:**

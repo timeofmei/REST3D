@@ -88,7 +88,11 @@ def create_sim_and_viewer(ig, headless=False, max_gpu_contact_pairs=None,
     params.physx.max_gpu_contact_pairs = max_gpu_contact_pairs
     _mb = max_gpu_contact_pairs * 256 // 1024 // 1024
     _logger.info(f"[Sim] max_gpu_contact_pairs = {max_gpu_contact_pairs} (~{_mb} MB GPU est.)")
-    sim = ig.create_sim(0, 0, gymapi.SIM_PHYSX, params)
+    # Isaac Gym's graphics-device initialization is not safe in WSL when the
+    # simulation is headless.  Avoid creating a Vulkan graphics context unless
+    # a viewer was explicitly requested.
+    graphics_device_id = -1 if headless else 0
+    sim = ig.create_sim(0, graphics_device_id, gymapi.SIM_PHYSX, params)
     if sim is None:
         raise RuntimeError("Failed to create sim")
     plane = gymapi.PlaneParams()
