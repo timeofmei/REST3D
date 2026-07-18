@@ -21,6 +21,7 @@ venv/
 
 # OS / editor
 .DS_Store
+.vscode/
 
 # Cloned upstream deps (installed editable; large)
 third_party_src/

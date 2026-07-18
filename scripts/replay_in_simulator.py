@@ -37,6 +37,8 @@ def config_args():
                     help="Physics settle steps")
     ap.add_argument("--headless", action="store_true",
                     help="Run without interactive viewer")
+    ap.add_argument("--cpu", action="store_true",
+                    help="Use CPU PhysX and CPU tensors (slower, but works when PyTorch does not support the GPU)")
     ap.add_argument("--save_video", action="store_true", default=True)
     ap.add_argument("--no_save_video", dest="save_video", action="store_false",
                     help="Disable MP4 saving")
@@ -308,12 +310,45 @@ def replay(args):
     # --viser implies headless (no gym popup window)
     headless = args.headless or args.viser
 
+    # Isaac Gym Preview 4 relies on PyTorch for its state tensors.  Do not try
+    # the GPU pipeline when this PyTorch build has no kernels for the installed
+    # GPU (for example, a cu121 build on an RTX 50-series GPU).
+    use_cpu = args.cpu
+    if not use_cpu:
+        if not torch.cuda.is_available():
+            _logger.warning("[replay] CUDA is unavailable; falling back to CPU PhysX")
+            use_cpu = True
+        else:
+            capability = torch.cuda.get_device_capability()
+            arch = f"sm_{capability[0]}{capability[1]}"
+            supported_arches = set(torch.cuda.get_arch_list())
+            # A cubin for an older minor version is usable on later minor
+            # versions of the same GPU generation.  Only reject a GPU newer
+            # than every generation bundled with this PyTorch wheel.
+            supported_capabilities = [
+                (int(a[3:-1]), int(a[-1])) for a in supported_arches
+            ]
+            if capability > max(supported_capabilities):
+                _logger.warning(
+                    "[replay] PyTorch %s supports up to %s, not %s; falling back to CPU PhysX. "
+                    "Pass --cpu to select this explicitly.",
+                    torch.__version__,
+                    f"sm_{max(supported_capabilities)[0]}{max(supported_capabilities)[1]}",
+                    arch,
+                )
+                use_cpu = True
+
+    if use_cpu:
+        _logger.info("[replay] using CPU PhysX; this is slower but avoids unsupported CUDA kernels")
+
     ig = gymapi.acquire_gym()
     sim, viewer = create_sim_and_viewer(
         ig,
         headless=headless,
         num_position_iterations=args.num_position_iterations,
         max_depenetration_velocity=args.max_depenetration_velocity,
+        use_gpu_pipeline=not use_cpu,
+        use_gpu_physics=not use_cpu,
     )
 
     # ---- load assets ------------------------------------------------
@@ -370,7 +405,7 @@ def replay(args):
     ig.prepare_sim(sim)
 
     _rt = ig.acquire_actor_root_state_tensor(sim)
-    root_states = gymtorch.wrap_tensor(_rt)   # (n_sim_actors, 13)  on GPU
+    root_states = gymtorch.wrap_tensor(_rt)   # (n_sim_actors, 13) on GPU or CPU
     n_actors = root_states.shape[0]
 
     name_to_idx = {

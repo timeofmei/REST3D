@@ -68,14 +68,16 @@ def set_viewer_camera_to_scene(gym, viewer, center, radius,
 def create_sim_and_viewer(ig, headless=False, max_gpu_contact_pairs=None,
                           viewer_width=1920, viewer_height=1080,
                           num_position_iterations=6,
-                          max_depenetration_velocity=5):
+                          max_depenetration_velocity=5,
+                          use_gpu_pipeline=True,
+                          use_gpu_physics=True):
     params = gymapi.SimParams()
     params.dt = 1 / 60
     params.substeps = 2
     params.up_axis = gymapi.UP_AXIS_Y
     params.gravity = gymapi.Vec3(0.0, -9.8, 0.0)
-    params.use_gpu_pipeline = True
-    params.physx.use_gpu = True
+    params.use_gpu_pipeline = use_gpu_pipeline
+    params.physx.use_gpu = use_gpu_physics
     params.physx.solver_type = 1
     params.physx.num_position_iterations = num_position_iterations
     params.physx.num_velocity_iterations = 1
@@ -87,7 +89,10 @@ def create_sim_and_viewer(ig, headless=False, max_gpu_contact_pairs=None,
         max_gpu_contact_pairs = 8 * 1024 * 1024
     params.physx.max_gpu_contact_pairs = max_gpu_contact_pairs
     _mb = max_gpu_contact_pairs * 256 // 1024 // 1024
-    _logger.info(f"[Sim] max_gpu_contact_pairs = {max_gpu_contact_pairs} (~{_mb} MB GPU est.)")
+    if use_gpu_physics:
+        _logger.info(f"[Sim] max_gpu_contact_pairs = {max_gpu_contact_pairs} (~{_mb} MB GPU est.)")
+    else:
+        _logger.info("[Sim] CPU PhysX and CPU tensor pipeline enabled")
     # Isaac Gym's graphics-device initialization is not safe in WSL when the
     # simulation is headless.  Avoid creating a Vulkan graphics context unless
     # a viewer was explicitly requested.

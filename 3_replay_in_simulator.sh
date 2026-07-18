@@ -13,4 +13,3 @@ PYTHONPATH="$(pwd):${PYTHONPATH}" CUDA_VISIBLE_DEVICES=0 python scripts/replay_i
     --scene_tree "output/${STEM}/stage2/scene_tree.json" \
     --output_dir "output/${STEM}/stage3/global_scene" \
     --settle_steps 120 --viser
-
