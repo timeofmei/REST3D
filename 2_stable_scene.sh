@@ -25,10 +25,12 @@ Options:
   --output-dir DIR   Use this exact run directory
   --backend NAME     isaac-gym (default) or isaac-lab
   --local-groups-only
-                     Stop after local CEM; required for isaac-lab until phase E
+                     Stop Isaac Lab after local CEM instead of continuing to global CEM
   --cem-pop-size N   Override parallel candidate environments
   --cem-iters-subtree N
                      Override local CEM iterations
+  --cem-iters-joint N
+                     Override global CEM iterations
   --cem-seed N       Fix the local CEM random seed
   --total-settle-steps N
   --vel-settle-steps N
@@ -67,6 +69,12 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || { echo "ERROR: --cem-iters-subtree requires a value" >&2; exit 2; }
             GYM_ARGS+=("--cem-iters-subtree" "$2")
             ISAACLAB_ARGS+=("--cem-iters" "$2")
+            shift 2
+            ;;
+        --cem-iters-joint)
+            [[ $# -ge 2 ]] || { echo "ERROR: --cem-iters-joint requires a value" >&2; exit 2; }
+            GYM_ARGS+=("--cem-iters-joint" "$2")
+            ISAACLAB_ARGS+=("--global-cem-iters" "$2")
             shift 2
             ;;
         --cem-seed)
@@ -116,8 +124,7 @@ printf 'Run directory: %s\n' "$RUN_DIR"
 
 if [[ "$BACKEND" == "isaac-lab" ]]; then
     if [[ "$LOCAL_GROUPS_ONLY" != true ]]; then
-        echo "ERROR: Isaac Lab global CEM is phase E and is not implemented yet; use --local-groups-only for phase D." >&2
-        exit 2
+        ISAACLAB_ARGS+=("--run-global")
     fi
     bash scripts/run_isaaclab_local_groups.sh \
         "${RUN_DIR}/stage2" \
@@ -127,7 +134,7 @@ if [[ "$BACKEND" == "isaac-lab" ]]; then
 fi
 
 if [[ "$LOCAL_GROUPS_ONLY" == true ]]; then
-    echo "ERROR: --local-groups-only is currently exposed only by the isaac-lab phase D pipeline." >&2
+    echo "ERROR: --local-groups-only is available only with --backend isaac-lab." >&2
     exit 2
 fi
 

@@ -1,8 +1,9 @@
 # REST3D Stage 3：Isaac Lab 迁移计划
 
 日期：2026-08-01
-状态：A–D 阶段已完成；D 输出经实际六对象 C 阶段回归，在通用凸分解碰撞下通过
-论文规定的 60 帧 `6/6` 稳定门禁；E–G 阶段尚未开始。
+状态：A–E 阶段已完成；Isaac Lab 正式 Stage 3 入口已串联 D 局部组和 E 全对象全局
+CEM。实际六对象场景在 RTX 5090 上完成 16 环境、2 轮全局优化，并在独立 replay
+的第 60 帧通过 `6/6`、`0.1 m / 0.1 rad` 稳定门禁；F–G 阶段尚未开始。
 
 ## 1. 目标与边界
 
@@ -654,11 +655,12 @@ URDF、没有待优化 OBJ 的根节点资产；这两项都不依赖具体对�
 ```text
 --backend isaac-gym|isaac-lab
 --local-groups-only
+--cem-iters-joint N
 ```
 
-默认仍为 `isaac-gym`，并继续进入原完整 Stage 3 流程。`isaac-lab` 当前必须同时给出
-`--local-groups-only`：D 只负责局部组，未给该开关会在创建输出前明确拒绝，避免误把
-尚未实施的 E 阶段全局 CEM 当作完成。
+默认仍为 `isaac-gym`，并继续进入原完整 Stage 3 流程。`isaac-lab` 不带
+`--local-groups-only` 时顺序运行 D 局部组和 E 全对象全局 CEM；带该开关则保持原
+D-only 行为。`--cem-iters-subtree` 和 `--cem-iters-joint` 可分别控制两个阶段。
 
 Isaac Lab 局部 pipeline 会：
 
@@ -781,7 +783,7 @@ bash scripts/run_isaaclab_replay.sh \
 
 结论严格按论文门禁限定在第 60 帧。额外运行到第 120 帧时，一个桌面子对象的旋转为
 `0.112858 rad`，超过同一阈值；因此后续最终稳定性验证仍应关注更长时间余量，不能
-把本次结果表述为无限时域静止。该复验没有启动或实现 E 阶段全局 CEM。
+把本次结果表述为无限时域静止。该复验本身没有启动或实现 E 阶段全局 CEM。
 
 ### E. 符合论文的全对象全局 CEM
 
@@ -810,6 +812,200 @@ sampled_entity_set <= simulated_object_set
 
 并建立一个与对象名称无关的合成层级测试：一个根、两个子对象、一个独立对象；
 移动根后验证子对象初始位姿正确组合，并验证任意子对象受碰撞扰动都会改变候选能量。
+
+#### E 阶段完成结果
+
+C 修复已提交为 `edf1373`（`Stabilize the Isaac Lab full-scene replay`），随后开始 E。
+只读审计确认旧 Isaac Gym 全局实现会通过 `actor_filter` 只创建组根和独立对象 actor；
+组内子对象仅在优化结束后按相对位姿补写 JSON/OBJ。因此旧实现的子对象确实没有进入
+全局候选的 PhysX、速度、稳定性、布局或穿插能量，这与论文要求不符。
+
+第一步新增后端无关的全局实体计划和候选展开层：
+
+- movable 且没有 movable 祖先的对象才成为 6-DoF sampled entity；
+- sampled root 的全部递归后代归属该 entity，但仍保持独立对象身份；
+- 每个候选通过
+  `T_child_world = T_candidate_root_world @ T_child_local` 生成全部后代状态；
+- 返回 tensor 的对象轴始终等于完整 scene object 顺序，未归属 sampled entity 的固定
+  对象也保留；
+- 全局能量入口拒绝缺少对象或对象顺序不一致的 state tensor；
+- 显式门禁要求 simulated/evaluated object set 都严格等于 scene object set。
+
+合成测试覆盖一个组根、两个直接子对象、一个嵌套后代和一个独立对象。测试只产生
+2 个 sampled entity，但候选 tensor 包含全部 5 个对象；根旋转和平移后全部后代保持
+递归相对变换，扰动嵌套后代会增加全局能量，删掉任一模拟或评估对象会失败。
+
+实际六对象 D 输出的计划工件位于：
+
+```text
+output/isaaclab_migration/cam22_global_entity_plan_phase_e_v1/global_entity_plan.json
+```
+
+它得到 `2` 个 sampled entity，成员数分别为 `2` 和 `4`，六个 movable 对象都有且
+只有一个 owner。零采样候选 shape 为 `[1, 6, 13]`，全部位姿回环最大误差
+`3.33e-16`，速度全部清零。可复现命令（输出目录必须不存在）：
+
+```bash
+python scripts/build_global_entity_plan.py \
+  --scene-tree output/cam_22_foreground_run1/stage2/scene_tree.json \
+  --physics-assets \
+    output/isaaclab_migration/cam22_formal_local_groups_phase_d_bbox30_v1/stage3/physics_assets/physics_assets.json \
+  --initial-states \
+    output/isaaclab_migration/cam22_formal_local_groups_phase_d_bbox30_v1/stage3/local_group_final_states.json \
+  --output-dir output/isaaclab_migration/NEW_GLOBAL_ENTITY_PLAN
+```
+
+实际 Isaac Lab runner 已在每个候选环境创建完整 `RigidObjectCollection`。对象继续是
+独立刚体，没有合并 group，也没有统一禁用父子碰撞；每个对象都有包含地面和其余
+对象的 contact view。CEM 动作只含 sampled entity 的 6-DoF，候选写入前递归展开
+全部后代；placement 和 settled 两个时刻的穿插、状态、速度、布局与稳定性均按全部
+对象求值，并同时输出逐对象、逐 entity 和全场景能量。
+
+论文中的 `E_pen` 不是 PhysX 接触深度，而是 placement 和 settlement 两个时刻的
+逐对凸包相交数量。最终实现会为场景中的每个对象从通用输入网格构造凸包，用 batched
+GJK 检查每一个无序对象对；每个相交对对全局能量贡献 `1`，并向两个端点各归因
+`0.5`，所以逐对象和严格等于全局计数且不会重复计数。PhysX 的接触分离深度仍保留在
+结果中作为诊断，但不再代替论文的几何穿插项。未在迭代上限内产生明确相交 witness
+的 GJK 对不会被强行记为碰撞；旧 Isaac Gym 调用则继续保留原来的保守默认值，避免
+改变旧后端行为。
+
+PhysX root-state 和接触 tensor 保持 `cuda:0`、`float32`。GJK 只把这组状态在 GPU
+上转换为 `float64` 后执行，以降低贴合边界的舍入敏感性；正式结果以 CUDA 计算为
+权威，并在导出后从 JSON 状态重新计算一次，必须与 CEM 实际打分一致才能通过。
+边界接触仍不是跨 CPU/CUDA 的位级判定：同一 settled 状态在本次外部复核中 CUDA
+计数为 `3`、CPU 计数为 `2`，因此不能把 CPU 重算值当作正式 GPU 优化结果。该限制
+不构成 tensor pipeline 回退，所有正式 CEM 几何判定都在 RTX 5090 上完成。
+
+运行时门禁覆盖 GPU PhysX、GPU tensor pipeline、GPU broadphase、CUDA state/contact
+tensor、完整 simulated/evaluated object set、sampled set 子集、每候选完整对象轴、
+层级相对位姿、质量/惯量、contact capacity、CEM 更新、全程最优状态和真实
+`sm_120` PyTorch CUDA 运算。小配置 `8 environments × 1 iteration` 与正式配置
+`16 environments × 2 iterations` 均通过。
+
+正式入口也已完成：`2_stable_scene.sh --backend isaac-lab` 会先运行 D，再在同一个新
+Stage 3 输出树中生成全局 entity plan、运行 E，并写出：
+
+```text
+local_group_pipeline_results.json
+global_entity_plan/global_entity_plan.json
+global_cem/real_global_cem_results.json
+global_cem/best_global_candidate_states.json
+global_cem/best_global_settled_states.json
+stage3_pipeline_results.json
+```
+
+`--local-groups-only` 仍可显式停在 D；默认 `isaac-gym` 分支未移除。CEM runner
+使用自身的全程最优记录，不再把当前最优重复塞入同轮 elites；distribution 门禁同时
+检查 mean 与 standard deviation，避免小种群在零动作最优时把一次有效方差更新误报
+为“没有更新”。`3_replay_in_simulator.sh --backend isaac-lab` 会自动识别新 Stage 3
+汇总，改用 Stage 2 几何、派生 URDF 和全局最优候选状态；旧 `global_scene` 输入路径
+仍作为旧格式 fallback。
+
+正式实际场景结果位于：
+
+```text
+output/isaaclab_migration/cam22_stage3_phase_e_gjk_fp64_formal_v1/stage3/
+```
+
+其配置和结果为：
+
+| 指标 | 结果 |
+| --- | ---: |
+| 场景对象 / sampled entity | `6 / 2` |
+| 并行环境 / 全局 CEM 轮数 | `16 / 2` |
+| 全局 state tensor | `[16, 6, 13]`，`cuda:0` |
+| 全局 contact tensor | `cuda:0` |
+| 全局 PhysX steps | `120` |
+| `E_pen` 几何设备 / dtype | `cuda:0 / float64` |
+| 最优 placement / settled 凸包相交对 | `0 / 3` |
+| 全局仿真耗时 / 吞吐 | `1.598 s / 75.09 steps/s` |
+| 全局最优 reward | `-2.822418` |
+| 整卡显存采样峰值 | `4157 MiB` |
+| 最大层级相对位置 / 旋转误差 | `1.61e-7 m / 0 rad` |
+| 逐对象/全局能量最大核对误差 | `1.07e-6` |
+| D+E pipeline 总耗时 | `38.624 s` |
+
+只读实际输入的可复现 D+E 命令（输出目录必须不存在）为：
+
+```bash
+bash scripts/run_isaaclab_local_groups.sh \
+  output/cam_22_foreground_run1/stage2 \
+  output/isaaclab_migration/NEW_STAGE3_OUTPUT \
+  --run-global \
+  --num-envs 16 --cem-iters 2 --global-cem-iters 2 \
+  --seed 73 --settle-steps 60 --early-steps 15
+```
+
+对于已经完成 Stage 2 的新图片运行目录，正式用户入口为：
+
+```bash
+bash 2_stable_scene.sh \
+  --backend isaac-lab \
+  --output-dir output/NEW_RUN \
+  --cem-pop-size 16 \
+  --cem-iters-subtree 2 \
+  --cem-iters-joint 2 \
+  --cem-seed 103 \
+  --total-settle-steps 60 \
+  --vel-settle-steps 15
+```
+
+新格式的 Stage 3 结果可直接通过顶层 replay 入口读取，无需手工转换为旧
+`global_scene`：
+
+```bash
+bash 3_replay_in_simulator.sh \
+  --backend isaac-lab \
+  --output-dir output/NEW_RUN \
+  --replay-output-dir output/NEW_REPLAY_OUTPUT \
+  --settle-steps 120
+```
+
+正式最优候选随后用独立进程重新加载几何和派生 URDF，以
+`convex_decomposition` 运行 120 帧并在第 60 帧验收。结果位于：
+
+```text
+output/isaaclab_migration/cam22_stage3_phase_e_gjk_fp64_formal_v1_final_stability_v2/
+```
+
+6 个对象全部稳定；第 60 帧逐对象最大位移 `0.03923 m`，最大旋转 `0.03821 rad`，
+均低于论文门限。第 120 帧相对初始位姿的最大位移 `0.04714 m`、最大旋转
+`0.04102 rad`，仍低于同一阈值。replay state tensor 为 `[121, 6, 13]`、contact
+tensor 为 `[121, 6]`、pair-contact tensor 为 `[121, 6, 6]`，全部在 `cuda:0`；
+120 帧物理仿真耗时 `1.560 s`、吞吐 `76.92 steps/s`、整卡显存采样峰值
+`4013 MiB`。replay 的 quaternion 往返门禁使用归一化后的公共 geodesic distance，
+避免把合法的 `float32` 单位四元数误判为约 `1e-8 rad` 的坐标转换错误。
+
+这里的“稳定”严格指论文规定的第 60 帧位姿门限，而不是无限时域静止。第 120 帧
+末端窗口仍观察到最大角速度 `2.036 rad/s`，所以将来若要采用“速度已收敛”这一更强
+标准，需要另设门禁或延长仿真；这不改变本次第 60 帧和第 120 帧位姿阈值结果。
+可复现命令为：
+
+```bash
+bash scripts/run_isaaclab_replay.sh \
+  output/cam_22_foreground_run1/stage2/scene_tree.json \
+  output/cam_22_foreground_run1/stage2/scene_canon \
+  output/isaaclab_migration/NEW_FINAL_STABILITY_OUTPUT \
+  --urdf-dir output/isaaclab_migration/NEW_STAGE3_OUTPUT/physics_assets/urdf_files \
+  --initial-states output/isaaclab_migration/NEW_STAGE3_OUTPUT/global_cem/best_global_candidate_states.json \
+  --expected-object-count 6 \
+  --collision-approximation convex_decomposition \
+  --settle-steps 120 --stability-evaluation-steps 60 \
+  --position-stability-threshold 0.1 \
+  --rotation-stability-threshold 0.1 \
+  --require-stable
+```
+
+E 收尾回归为 `44 passed`。新增/修改 Python 文件在 `rest3d` Python 3.11、旧
+`gym` Python 3.8 和 `isaaclab` Python 3.11 下通过 `py_compile`，shell 通过
+`bash -n`；旧 `gym` 环境可导入 Isaac Gym、原 Stage 3 入口和公共全局计划/能量
+模块，`gjk_batch` 的旧保守行为仍是默认值。三个 Isaac Lab wrapper 均实测拒绝
+覆盖已有输出目录。正式导出的 placement/settled 状态在 RTX 5090 上重新加载凸包
+并得到与结果文件一致的 GJK 计数 `0 / 3`。实现文件经对象名扫描，不含当前六对象
+名称。
+根目录直接运行 pytest 会额外收集只属于 Isaac Lab 环境的
+`scripts/isaaclab_smoke_test.py`，因此跨环境纯逻辑回归的明确命令是
+`python -m pytest -q tests`。
 
 ### F. Isaac Gym / Isaac Lab 结果与性能对比
 

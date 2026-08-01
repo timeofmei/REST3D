@@ -216,7 +216,10 @@ def _cem_config() -> SimpleNamespace:
         cem_iters_joint=ARGS.cem_iters,
         cem_iters_subtree=ARGS.cem_iters,
         cem_update_mode="cem",
-        keep_best=True,
+        # The optimizer already records the all-time best action separately.
+        # Re-inserting it into the current elites duplicates the first-iteration
+        # winner and can collapse a small population before it has explored.
+        keep_best=False,
         update_use_only_best=False,
         std_update_mode="topk_std",
         decay_std_rate=0.95,
@@ -575,7 +578,10 @@ def _run() -> dict:
             and bool(torch.isfinite(default_local).all())
         )
         or INITIAL_STATES is None,
-        "cem_distribution_updated": not np.allclose(cem.mean, initial_mean),
+        "cem_distribution_updated": not (
+            np.allclose(cem.mean, initial_mean)
+            and np.allclose(cem.std, initial_std)
+        ),
         "cem_best_reward_is_monotonic": all(
             later >= earlier
             for earlier, later in zip(all_time_best_rewards, all_time_best_rewards[1:])

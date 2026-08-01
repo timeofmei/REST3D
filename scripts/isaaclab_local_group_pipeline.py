@@ -35,6 +35,14 @@ def _parse_args():
     parser.add_argument("--minimum-mass-kg", type=float, default=0.02)
     parser.add_argument("--maximum-mass-kg", type=float, default=100.0)
     parser.add_argument("--minimum-bbox-fill-fraction", type=float, default=0.30)
+    parser.add_argument(
+        "--run-global",
+        action="store_true",
+        help="Continue from local groups into the Stage E full-scene global CEM",
+    )
+    parser.add_argument("--global-num-envs", type=int)
+    parser.add_argument("--global-cem-iters", type=int)
+    parser.add_argument("--global-seed", type=int)
     args = parser.parse_args()
     args.scene_dir = args.scene_dir.expanduser().resolve(strict=True)
     args.output_dir = args.output_dir.expanduser().resolve()
@@ -46,6 +54,10 @@ def _parse_args():
         parser.error("--num-envs must be at least 4")
     if args.cem_iters < 1:
         parser.error("--cem-iters must be positive")
+    if args.global_num_envs is not None and args.global_num_envs < 4:
+        parser.error("--global-num-envs must be at least 4")
+    if args.global_cem_iters is not None and args.global_cem_iters < 1:
+        parser.error("--global-cem-iters must be positive")
     if not 1 <= args.early_steps < args.settle_steps:
         parser.error("settle steps must satisfy 1 <= early < settle")
     if args.interaction_margin_m < 0.0 or args.ground_clearance_m < 0.0:
@@ -237,7 +249,103 @@ def _run(args) -> dict:
         "total_seconds": time.perf_counter() - started,
     }
     _write_json(args.output_dir / "local_group_pipeline_results.json", result)
-    return result
+
+    if not args.run_global:
+        return result
+
+    global_plan_dir = args.output_dir / "global_entity_plan"
+    global_run_dir = args.output_dir / "global_cem"
+    _run_logged(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "build_global_entity_plan.py"),
+            "--scene-tree",
+            str(args.scene_tree),
+            "--physics-assets",
+            str(physics_path),
+            "--initial-states",
+            str(final_states_path),
+            "--output-dir",
+            str(global_plan_dir),
+            "--allow-output-below-derived-inputs",
+        ],
+        args.output_dir / "build_global_entity_plan.log",
+    )
+    global_plan_path = global_plan_dir / "global_entity_plan.json"
+    global_num_envs = args.global_num_envs or args.num_envs
+    global_cem_iters = args.global_cem_iters or args.cem_iters
+    global_seed = (
+        args.global_seed
+        if args.global_seed is not None
+        else args.seed + len(execution_order)
+    )
+    _run_logged(
+        [
+            "bash",
+            str(repo_root / "scripts" / "run_isaaclab_real_global_cem.sh"),
+            str(physics_path),
+            str(global_plan_path),
+            str(final_states_path),
+            str(global_run_dir),
+            "--num-envs",
+            str(global_num_envs),
+            "--cem-iters",
+            str(global_cem_iters),
+            "--settle-steps",
+            str(args.settle_steps),
+            "--early-steps",
+            str(args.early_steps),
+            "--seed",
+            str(global_seed),
+        ],
+        args.output_dir / "global_cem.stdout.log",
+    )
+    global_result_path = global_run_dir / "real_global_cem_results.json"
+    with global_result_path.open("r", encoding="utf-8") as file:
+        global_result = json.load(file)
+    if not global_result.get("passed"):
+        raise RuntimeError("global CEM did not pass its checks")
+
+    stage3_result = {
+        "passed": True,
+        "backend": "isaac-lab",
+        "scope": "stage3-local-and-global",
+        "scene_dir": str(args.scene_dir),
+        "output_dir": str(args.output_dir),
+        "local_phase": str(args.output_dir / "local_group_pipeline_results.json"),
+        "global_entity_plan": str(global_plan_path),
+        "global_phase": str(global_result_path),
+        "physics_assets": str(physics_path),
+        "local_final_states": str(final_states_path),
+        "final_candidate_states": global_result["outputs"]["candidate_states"],
+        "final_settled_states": global_result["outputs"]["settled_states"],
+        "scene_object_count": len(scene_names),
+        "sampled_entity_count": global_result["simulation"][
+            "sampled_entity_count"
+        ],
+        "local_group_count": len(plan["groups"]),
+        "local_num_envs": args.num_envs,
+        "local_cem_iterations": args.cem_iters,
+        "global_num_envs": global_num_envs,
+        "global_cem_iterations": global_cem_iters,
+        "global_seed": global_seed,
+        "global_best_reward": global_result["cem"]["best_reward"],
+        "global_state_tensor_device": global_result["simulation"][
+            "state_tensor_device"
+        ],
+        "global_contact_tensor_device": global_result["simulation"][
+            "contact_tensor_device"
+        ],
+        "global_simulation_seconds": global_result["simulation"][
+            "simulation_seconds"
+        ],
+        "global_peak_gpu_memory_mib": global_result["simulation"][
+            "system_gpu_memory_used_mib_peak"
+        ],
+        "total_seconds": time.perf_counter() - started,
+    }
+    _write_json(args.output_dir / "stage3_pipeline_results.json", stage3_result)
+    return stage3_result
 
 
 def main() -> int:
@@ -250,8 +358,13 @@ def main() -> int:
             "error_type": type(error).__name__,
             "error": str(error),
         }
+        failure_name = (
+            "stage3_pipeline_failure.json"
+            if args.run_global
+            else "local_group_pipeline_failure.json"
+        )
         try:
-            _write_json(args.output_dir / "local_group_pipeline_failure.json", failure)
+            _write_json(args.output_dir / failure_name, failure)
         finally:
             raise
     print(json.dumps(result, indent=2))

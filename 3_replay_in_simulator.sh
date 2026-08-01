@@ -96,9 +96,24 @@ SCENE_TREE="${RUN_DIR}/stage2/scene_tree.json"
 SCENE_DIR="${RUN_DIR}/stage3/global_scene"
 
 if [[ "$BACKEND" == "isaac-lab" ]]; then
+    ISAACLAB_REPLAY_ARGS=(--settle-steps "$SETTLE_STEPS")
+    if [[ -f "${RUN_DIR}/stage3/stage3_pipeline_results.json" ]]; then
+        SCENE_DIR="${RUN_DIR}/stage2/scene_canon"
+        PHYSICS_URDF_DIR="${RUN_DIR}/stage3/physics_assets/urdf_files"
+        GLOBAL_STATES="${RUN_DIR}/stage3/global_cem/best_global_candidate_states.json"
+        [[ -d "$SCENE_DIR" && -d "$PHYSICS_URDF_DIR" && -f "$GLOBAL_STATES" ]] || {
+            echo "ERROR: incomplete Isaac Lab Stage 3 output under ${RUN_DIR}/stage3" >&2
+            exit 1
+        }
+        ISAACLAB_REPLAY_ARGS+=(
+            --urdf-dir "$PHYSICS_URDF_DIR"
+            --initial-states "$GLOBAL_STATES"
+            --collision-approximation convex_decomposition
+        )
+    fi
     exec bash scripts/run_isaaclab_replay.sh \
         "$SCENE_TREE" "$SCENE_DIR" "$REPLAY_OUTPUT_DIR" \
-        --settle-steps "$SETTLE_STEPS"
+        "${ISAACLAB_REPLAY_ARGS[@]}"
 fi
 
 [[ -n "${CONDA_PREFIX:-}" ]] || {

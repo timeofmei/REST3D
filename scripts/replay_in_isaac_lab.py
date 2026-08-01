@@ -25,7 +25,10 @@ from rest3d.sim.replay_scene import (
     rest_states_to_lab,
 )
 from rest3d.sim.local_results import load_scene_states
-from rest3d.sim.stability import evaluate_replay_stability
+from rest3d.sim.stability import (
+    evaluate_replay_stability,
+    quaternion_geodesic_distance_wxyz,
+)
 
 
 def _parse_args():
@@ -521,10 +524,9 @@ def _run() -> dict:
     )
     target_rest = INITIAL_STATES_REST
     initial_position_error = np.linalg.norm(states_rest[0, :, :3] - target_rest[:, :3], axis=1)
-    initial_quat_alignment = np.abs(
-        np.sum(states_rest[0, :, 3:7] * target_rest[:, 3:7], axis=1)
+    initial_quat_error = quaternion_geodesic_distance_wxyz(
+        states_rest[0, :, 3:7], target_rest[:, 3:7]
     )
-    initial_quat_error = 2.0 * np.arccos(np.clip(initial_quat_alignment, 0.0, 1.0))
 
     minimum_contact_separation = np.array(
         [
