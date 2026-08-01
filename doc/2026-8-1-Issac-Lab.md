@@ -1,7 +1,8 @@
 # REST3D Stage 3：Isaac Lab 迁移计划
 
 日期：2026-08-01
-状态：A–B 阶段已完成；实际场景稳定性验证与 CEM 迁移（C–G）尚未开始。
+状态：A–B 阶段已完成；C 阶段验证实现已完成，但实际场景的通用凸分解验证未通过；
+D–G 阶段尚未开始。
 
 ## 1. 目标与边界
 
@@ -426,6 +427,85 @@ bash scripts/run_isaaclab_replay.sh \
 
 该阶段不通过时先诊断资产尺度、坐标、collision、质量/惯量和关系表达，不直接调
 CEM 参数掩盖问题。
+
+#### C 阶段当前执行结果（2026-08-01）
+
+阶段 B 已提交为 `7f70ccb`（`Add Isaac Lab replay backend`）。随后启动 C 阶段，
+没有开始 D 阶段或修改 CEM。当前实现增加了以下通用验证能力：
+
+- `--stability-evaluation-steps` 明确指定相对第 0 帧的评估步，默认 `60`；
+- `--position-stability-threshold` 和 `--rotation-stability-threshold` 默认分别为
+  `0.1 m`、`0.1 rad`，等于阈值仍稳定，超过任一阈值即不稳定；
+- 四元数使用符号不变的 SO(3) geodesic 最短角距离，不用欧拉角差；
+- `--expected-object-count` 可对当前实验显式要求六对象，但实现不包含对象名或固定
+  对象数量；
+- 每个对象回验刚体数量、collision shape 数、质量、惯量和质心；
+- 启用 GPU PhysX contact view，逐帧记录总/成对接触力、接触点数、最小 separation
+  和最大穿插深度；状态和接触 tensor 都必须位于 CUDA；
+- JSON 保存逐对象结果和人类可读原因，`stability_metrics.npz` 保存完整数值数组；
+  `--require-stable` 使任一对象不稳定时进程返回失败。
+
+后端无关稳定性函数已有阈值边界、四元数双覆盖、速度窗口和帧数错误测试。合成场景
+中的动态体刻意下落 `0.300000 m`：运行时检查全部通过、固定体稳定、动态体按规则
+判为不稳定，证明验证器不会把“仿真成功”误当成“场景稳定”。合成结果位于：
+
+```text
+output/isaaclab_migration/synthetic_replay_phase_c_v1/
+```
+
+实际六对象场景先以 B 阶段的单凸包近似运行。它得到 6/6 稳定，但人物与桌子之间的
+最大穿插约 `0.03425 m`，说明单凸包结果过于乐观，不能作为 C 阶段最终结论。随后
+使用不依赖对象名称的 `convex_decomposition` 重跑，所有对象各生成 16 个 collision
+shape，结果如下：
+
+| 指标 | 结果 |
+| --- | ---: |
+| 对象数 / 稳定数 | `6 / 5` |
+| 状态 tensor | `[61, 6, 13]`，`cuda:0` |
+| 成对接触 tensor | `[61, 6, 6]`，`cuda:0` |
+| GPU simulation / tensor pipeline / broadphase | `GPU / GPU / GPU` |
+| 不稳定对象第 60 步位移 | `0.140452 m` |
+| 不稳定对象第 60 步旋转 | `0.437530 rad` |
+| 资产转换耗时 | `2.894 s` |
+| 60 步仿真耗时 | `0.796 s`，`75.393 steps/s`（详细接触采样开启） |
+| 总耗时 | `5.664 s` |
+| 整卡显存采样峰值 | `4014 MiB` |
+
+失败对象为场景树中“人物位于椅子上”的子对象。成对接触数据把主要初始冲突定位为
+人物—桌子（最大穿插 `0.027419 m`，接触存在 57/61 帧），其次为人物—椅子
+（`0.006433 m`）。这只是结果诊断，代码没有使用这些对象名做分支或禁碰撞。
+
+同时，输入 URDF 对所有几何尺度差异很大的对象都使用完全相同的 `1.0 kg` 质量和
+对角 `0.1 kg·m²` 惯量。这是现有资产生成的占位物理属性，不能被视为满足通用质量/
+惯量策略。当前结论是：C 阶段验证链路已建立并真实报告失败；实际凸分解场景尚未
+通过稳定性标准，下一步应从通用质量/惯量生成、初始关系约束和碰撞体质量继续修正，
+不能调宽阈值或提前进入 CEM。
+
+正式失败证据保存在全新目录：
+
+```text
+output/isaaclab_migration/cam22_stability_phase_c_convex_decomposition_v2/
+```
+
+可复现命令（输出目录必须在执行前不存在）：
+
+```bash
+bash scripts/run_isaaclab_replay.sh \
+  output/cam_22_foreground_run1/stage2/scene_tree.json \
+  output/cam_22_foreground_run1/stage3/global_scene \
+  output/isaaclab_migration/cam22_stability_phase_c_reproduction_v1 \
+  --settle-steps 60 \
+  --stability-evaluation-steps 60 \
+  --expected-object-count 6 \
+  --position-stability-threshold 0.1 \
+  --rotation-stability-threshold 0.1 \
+  --collision-approximation convex_decomposition \
+  --require-stable
+```
+
+WSL headless 日志仍会报告 Vulkan/renderer 无设备；该路径没有图形输出。独立的
+PhysX context、state/contact CUDA tensor、NVRTC 12.8 和 GPU broadphase 检查均通过，
+因此这些 renderer 消息不表示本次 GPU 物理计算回退到 CPU。
 
 ### D. 局部组 CEM 移植
 
