@@ -38,7 +38,10 @@ sys.excepthook = _excepthook
 def build_agent_components(args):
     """Build the segmentation agent: a SAM3 processor + a VLM backend."""
     # Build SAM3 processor
-    model = build_sam3_image_model()
+    model = build_sam3_image_model(
+        checkpoint_path=os.path.expandvars("$HOME/sam3/checkpoints/sam3.pt"),
+        load_from_HF=False,
+    )
     sam3_processor = Sam3Processor(model, confidence_threshold=0.5)
 
     # llm_config is used only to name output files

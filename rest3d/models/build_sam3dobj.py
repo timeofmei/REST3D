@@ -1,8 +1,18 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 import os
 
-# not ideal to put that here
-os.environ["CUDA_HOME"] = os.environ["CONDA_PREFIX"]
+# Respect an explicitly selected toolkit.  The old unconditional assignment to
+# CONDA_PREFIX made CUDA extensions compile with the environment's CUDA 12.1
+# toolkit even on Blackwell, which requires a toolkit capable of sm_120.
+if "CUDA_HOME" not in os.environ:
+    for _cuda_home in ("/usr/local/cuda-12.8", "/usr/local/cuda"):
+        if os.path.isfile(os.path.join(_cuda_home, "bin", "nvcc")):
+            os.environ["CUDA_HOME"] = _cuda_home
+            break
+    else:
+        _conda_prefix = os.environ.get("CONDA_PREFIX")
+        if _conda_prefix:
+            os.environ["CUDA_HOME"] = _conda_prefix
 os.environ["LIDRA_SKIP_INIT"] = "true"
 
 from typing import Union, Optional, List, Callable

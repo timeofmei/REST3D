@@ -34,6 +34,13 @@
 
 Please follow [INSTALL.md](INSTALL.md) for detailed installation instructions.
 
+Then reactivate the environment:
+
+```bash
+conda deactivate
+conda activate gym
+```
+
 ## 🚀 Quick start
 Follow the steps below to reconstruct a physically stable 3D scene from a single image and interactively inspect object stability in physics simulator.
 
@@ -44,7 +51,7 @@ Follow the steps below to reconstruct a physically stable 3D scene from a single
 
 ```bash
 conda activate rest3d
-bash 1_infer_scenecanon.sh. #Change `INPUT` to your image path (defaults to the demo image)
+bash 1_infer_scenecanon.sh #Change `INPUT` to your image path (defaults to the demo image)
 ```
 Outputs are saved to `output/<image_name>/stage2/scene_canon/`.
 

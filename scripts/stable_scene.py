@@ -962,6 +962,16 @@ def config_args():
                     help="Path to stage2 output directory (contains scene_canon/, scene_tree.json)")
     ap.add_argument("--output_dir", type=str, required=True,
                     help="Output directory for stage3 results")
+    ap.add_argument("--cem-pop-size", type=int, default=None,
+                    help="Override the number of parallel CEM environments")
+    ap.add_argument("--cem-episodes", type=int, default=None)
+    ap.add_argument("--cem-iters-subtree", type=int, default=None)
+    ap.add_argument("--cem-iters-joint", type=int, default=None)
+    ap.add_argument("--total-settle-steps", type=int, default=None)
+    ap.add_argument("--vel-settle-steps", type=int, default=None)
+    ap.add_argument("--no-vhacd", action="store_true",
+                    help="Disable V-HACD (useful for a fast compatibility smoke test)")
+    ap.add_argument("--no-wandb", action="store_true")
     cli = ap.parse_args()
 
     cfg = StableSceneCfg()
@@ -970,6 +980,28 @@ def config_args():
     args.output_dir = cli.output_dir
     args.scene_canon_dir = os.path.join(cli.scene_dir, "scene_canon")
     args.wandb_run_name = os.path.basename(os.path.normpath(cli.output_dir))
+    for cli_name, cfg_name in (
+        ("cem_pop_size", "cem_pop_size"),
+        ("cem_episodes", "cem_episodes"),
+        ("cem_iters_subtree", "cem_iters_subtree"),
+        ("cem_iters_joint", "cem_iters_joint"),
+        ("total_settle_steps", "total_settle_steps"),
+        ("vel_settle_steps", "vel_settle_steps"),
+    ):
+        value = getattr(cli, cli_name)
+        if value is not None:
+            setattr(args, cfg_name, value)
+    if cli.no_vhacd:
+        args.vhacd_enabled = False
+    if cli.no_wandb:
+        args.use_wandb = False
+
+    if args.cem_pop_size < 1:
+        ap.error("--cem-pop-size must be at least 1")
+    if args.cem_episodes < 1:
+        ap.error("--cem-episodes must be at least 1")
+    if args.vel_settle_steps < 0 or args.total_settle_steps < args.vel_settle_steps:
+        ap.error("settle steps must satisfy 0 <= vel <= total")
 
     return args
 

@@ -1,6 +1,8 @@
 # `rest3d` Environment Setup
 
-Tested on CUDA 12.1, Python 3.11, PyTorch 2.5.1. Used for scene reconstruction (Stage 1-2).
+Used for scene reconstruction (Stage 1-2). The legacy configuration uses CUDA
+12.1 / PyTorch 2.5.1. RTX 50-series GPUs require the Blackwell configuration
+below (CUDA 12.8 / PyTorch 2.7.1).
 
 > Please first clone the repo and set `REST3D_ROOT` as described in the main [README](../README.md):
 > ```bash
@@ -15,7 +17,19 @@ conda activate rest3d
 
 **2. Install PyTorch + Python dependencies:**
 ```bash
+# RTX 30/40-series and older tested configuration
 pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+pip install -r environments/requirements_rest3d.txt
+```
+
+For an RTX 50-series GPU, install CUDA Toolkit 12.8 at
+`/usr/local/cuda-12.8`, then use the cu128 wheels instead:
+
+```bash
+export CUDA_HOME=/usr/local/cuda-12.8
+export PATH="$CUDA_HOME/bin:$PATH"
+pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 \
+  --index-url https://download.pytorch.org/whl/cu128
 pip install -r environments/requirements_rest3d.txt
 ```
 
@@ -51,6 +65,26 @@ pip install -e '.[inference]'
 export SAM3D_OBJECTS_ROOT="$(pwd)"
 ```
 
+For an RTX 50-series GPU, repair the upstream CUDA 12.1 pins after installing
+SAM 3D Objects. Its Blackwell execution path uses PyTorch SDPA, so the older
+prebuilt `xformers` and `flash-attn` extensions should be removed. Install
+Kaolin's matching wheel and compile PyTorch3D for `sm_120`:
+
+```bash
+pip uninstall -y xformers flash-attn pytorch3d kaolin
+pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 \
+  --index-url https://download.pytorch.org/whl/cu128
+pip install kaolin==0.18.0 \
+  -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.7.1_cu128.html
+
+export CUDA_HOME=/usr/local/cuda-12.8
+export PATH="$CUDA_HOME/bin:$PATH"
+export TORCH_CUDA_ARCH_LIST=12.0
+export FORCE_CUDA=1
+pip install --no-build-isolation \
+  'git+https://github.com/facebookresearch/pytorch3d.git@75ebeeaea0908c5527e7b1e305fbc7681382db47'
+```
+
 Download the SAM 3D Objects inference checkpoints into `$SAM3D_OBJECTS_ROOT/checkpoints/hf/` following the [official guide](https://github.com/facebookresearch/sam-3d-objects/blob/main/doc/setup.md#2-getting-checkpoints).
 
 <details>
@@ -76,7 +110,8 @@ pip install -e ".[gemini]"     # default Gemini backend
 
 **6. Verify:**
 
-This should import everything without error and print something like `torch 2.5.1+cu121 cuda True`.
+This should import everything without error. On a 5090, the architecture list
+must include `sm_120`, and the CUDA allocation must succeed.
 ```bash
 python -c "import torch, sam3, sam3d_objects, pytorch3d, kaolin, rest3d; \
 print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"

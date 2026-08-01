@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import time
+import warnings
 
 from isaacgym import gymapi, gymtorch
 import numpy as np
@@ -39,6 +40,52 @@ STAGING_Y  = 100.0
 SLEEP_TIME = 0
 
 
+def torch_cuda_pipeline_supported(device=0):
+    """Return whether this PyTorch build can execute kernels on ``device``.
+
+    ``torch.cuda.is_available()`` only verifies that the CUDA driver can be
+    opened.  It still returns True when the wheel has no kernel image for a
+    newer GPU, such as a cu121 wheel on an RTX 5090 (sm_120).
+    """
+    if not torch.cuda.is_available():
+        return False, "CUDA is unavailable to PyTorch"
+
+    # PyTorch emits its generic unsupported-architecture warning while merely
+    # querying the device.  We replace it with the more useful pipeline-mode
+    # message returned below.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        capability = torch.cuda.get_device_capability(device)
+    supported = []
+    for arch in torch.cuda.get_arch_list():
+        if not arch.startswith("sm_"):
+            continue
+        digits = arch[3:]
+        if len(digits) < 2 or not digits.isdigit():
+            continue
+        supported.append((int(digits[:-1]), int(digits[-1])))
+
+    if not supported:
+        return False, f"PyTorch {torch.__version__} reports no compiled CUDA architectures"
+
+    # NVIDIA cubins are compatible with later minor revisions in the same
+    # architecture family (for example sm_80 on sm_86), but not across major
+    # architecture generations (for example sm_90 on sm_120).
+    compatible = any(
+        major == capability[0] and minor <= capability[1]
+        for major, minor in supported
+    )
+    if compatible:
+        return True, ""
+
+    max_supported = max(supported)
+    return False, (
+        f"PyTorch {torch.__version__} supports up to "
+        f"sm_{max_supported[0]}{max_supported[1]}, not "
+        f"sm_{capability[0]}{capability[1]}"
+    )
+
+
 # ===================================================================
 # Isaac Gym sim setup
 # ===================================================================
@@ -68,14 +115,16 @@ def set_viewer_camera_to_scene(gym, viewer, center, radius,
 def create_sim_and_viewer(ig, headless=False, max_gpu_contact_pairs=None,
                           viewer_width=1920, viewer_height=1080,
                           num_position_iterations=6,
-                          max_depenetration_velocity=5):
+                          max_depenetration_velocity=5,
+                          use_gpu_pipeline=True,
+                          use_gpu_physics=True):
     params = gymapi.SimParams()
     params.dt = 1 / 60
     params.substeps = 2
     params.up_axis = gymapi.UP_AXIS_Y
     params.gravity = gymapi.Vec3(0.0, -9.8, 0.0)
-    params.use_gpu_pipeline = True
-    params.physx.use_gpu = True
+    params.use_gpu_pipeline = use_gpu_pipeline
+    params.physx.use_gpu = use_gpu_physics
     params.physx.solver_type = 1
     params.physx.num_position_iterations = num_position_iterations
     params.physx.num_velocity_iterations = 1
@@ -87,8 +136,15 @@ def create_sim_and_viewer(ig, headless=False, max_gpu_contact_pairs=None,
         max_gpu_contact_pairs = 8 * 1024 * 1024
     params.physx.max_gpu_contact_pairs = max_gpu_contact_pairs
     _mb = max_gpu_contact_pairs * 256 // 1024 // 1024
-    _logger.info(f"[Sim] max_gpu_contact_pairs = {max_gpu_contact_pairs} (~{_mb} MB GPU est.)")
-    sim = ig.create_sim(0, 0, gymapi.SIM_PHYSX, params)
+    if use_gpu_physics:
+        _logger.info(f"[Sim] max_gpu_contact_pairs = {max_gpu_contact_pairs} (~{_mb} MB GPU est.)")
+    else:
+        _logger.info("[Sim] CPU PhysX and CPU tensor pipeline enabled")
+    # Isaac Gym's graphics-device initialization is not safe in WSL when the
+    # simulation is headless.  Avoid creating a Vulkan graphics context unless
+    # a viewer was explicitly requested.
+    graphics_device_id = -1 if headless else 0
+    sim = ig.create_sim(0, graphics_device_id, gymapi.SIM_PHYSX, params)
     if sim is None:
         raise RuntimeError("Failed to create sim")
     plane = gymapi.PlaneParams()
@@ -498,11 +554,35 @@ class MultiEnvCEMPlacement:
         _floor = 512 * 1024
         _cap = 8 * 1024 * 1024
         _contact_pairs = max(_floor, min(_cap, int(_est * 1.15) + 65536))
+        use_gpu_physics = bool(getattr(args, "use_gpu_physics", True))
+        pipeline_setting = getattr(args, "use_gpu_pipeline", None)
+        pipeline_supported, pipeline_reason = torch_cuda_pipeline_supported()
+        if not torch.cuda.is_available():
+            use_gpu_physics = False
+        if pipeline_setting is None:
+            use_gpu_pipeline = use_gpu_physics and pipeline_supported
+        else:
+            use_gpu_pipeline = bool(pipeline_setting) and use_gpu_physics
+            if use_gpu_pipeline and not pipeline_supported:
+                raise RuntimeError(
+                    f"GPU tensor pipeline was requested, but {pipeline_reason}"
+                )
+
+        if use_gpu_physics and not use_gpu_pipeline:
+            _logger.warning(
+                "[Sim] %s; using GPU PhysX with the CPU tensor pipeline",
+                pipeline_reason,
+            )
+        elif not use_gpu_physics:
+            _logger.info("[Sim] using CPU PhysX and the CPU tensor pipeline")
+
         self.sim, self.viewer = create_sim_and_viewer(
             self.ig, args.headless, max_gpu_contact_pairs=_contact_pairs,
             viewer_width=1920, viewer_height=1080,
             num_position_iterations=getattr(args, "num_position_iterations", 6),
-            max_depenetration_velocity=getattr(args, "max_depenetration_velocity", 5))
+            max_depenetration_velocity=getattr(args, "max_depenetration_velocity", 5),
+            use_gpu_pipeline=use_gpu_pipeline,
+            use_gpu_physics=use_gpu_physics)
 
         _loaded_mesh = {k: v for k, v in self.mesh_info.items()
                         if k in self.fixed_obj_names or k in self.movable_obj_names}

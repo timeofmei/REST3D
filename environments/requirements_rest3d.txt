@@ -1,6 +1,6 @@
-torch==2.5.1
-torchvision==0.20.1
-torchaudio==2.5.1
+# Install the matching PyTorch/CUDA build separately as documented in
+# install_rest3d.md.  Keeping it out of this file prevents pip from silently
+# replacing a Blackwell-capable cu128 wheel with the legacy cu121 build.
 numpy==1.26
 networkx==3.2.1
 pytorch-lightning
@@ -38,3 +38,4 @@ pycocotools
 tensorboard
 huggingface_hub
 openai
+ninja

@@ -12,7 +12,10 @@ import time
 import numpy as np
 import torch
 
-from rest3d.models.cem_opt import create_sim_and_viewer
+from rest3d.models.cem_opt import (
+    create_sim_and_viewer,
+    torch_cuda_pipeline_supported,
+)
 from rest3d.models.scene_layout import (
     parse_scene_tree,
     split_to_fixed_movable_set,
@@ -37,6 +40,8 @@ def config_args():
                     help="Physics settle steps")
     ap.add_argument("--headless", action="store_true",
                     help="Run without interactive viewer")
+    ap.add_argument("--cpu", action="store_true",
+                    help="Use CPU PhysX and CPU tensors (slower, but works when PyTorch does not support the GPU)")
     ap.add_argument("--save_video", action="store_true", default=True)
     ap.add_argument("--no_save_video", dest="save_video", action="store_false",
                     help="Disable MP4 saving")
@@ -308,12 +313,30 @@ def replay(args):
     # --viser implies headless (no gym popup window)
     headless = args.headless or args.viser
 
+    # Isaac Gym exposes two independent CUDA switches.  Its bundled PhysX can
+    # run on a Blackwell GPU even though the Python 3.8-compatible PyTorch
+    # wheel cannot execute sm_120 kernels.  In that case keep GPU PhysX and use
+    # host tensors for the state pipeline.
+    use_gpu_physics = not args.cpu and torch.cuda.is_available()
+    pipeline_supported, pipeline_reason = torch_cuda_pipeline_supported()
+    use_gpu_pipeline = use_gpu_physics and pipeline_supported
+
+    if use_gpu_physics and not use_gpu_pipeline:
+        _logger.warning(
+            "[replay] %s; using GPU PhysX with the CPU tensor pipeline",
+            pipeline_reason,
+        )
+    elif not use_gpu_physics:
+        _logger.info("[replay] using CPU PhysX and the CPU tensor pipeline")
+
     ig = gymapi.acquire_gym()
     sim, viewer = create_sim_and_viewer(
         ig,
         headless=headless,
         num_position_iterations=args.num_position_iterations,
         max_depenetration_velocity=args.max_depenetration_velocity,
+        use_gpu_pipeline=use_gpu_pipeline,
+        use_gpu_physics=use_gpu_physics,
     )
 
     # ---- load assets ------------------------------------------------
@@ -370,7 +393,7 @@ def replay(args):
     ig.prepare_sim(sim)
 
     _rt = ig.acquire_actor_root_state_tensor(sim)
-    root_states = gymtorch.wrap_tensor(_rt)   # (n_sim_actors, 13)  on GPU
+    root_states = gymtorch.wrap_tensor(_rt)   # (n_sim_actors, 13) on GPU or CPU
     n_actors = root_states.shape[0]
 
     name_to_idx = {
