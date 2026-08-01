@@ -4,12 +4,52 @@ import torch
 
 from rest3d.sim.local_cem import (
     LocalCEMEnergyWeights,
+    apply_pose_deltas_about_centroids_wxyz,
+    apply_group_member_pose_deltas_wxyz,
     apply_pose_deltas_wxyz,
     evaluate_local_cem_energy,
 )
 
 
 class LocalCEMTest(unittest.TestCase):
+    def test_pose_delta_rotates_about_mesh_centroid(self):
+        reference = torch.tensor([[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]])
+        centroid = torch.tensor([[2.0, 0.0, 0.0]])
+        samples = torch.zeros(1, 1, 6)
+        samples[0, 0, 5] = torch.pi
+
+        pose = apply_pose_deltas_about_centroids_wxyz(reference, centroid, samples)
+
+        torch.testing.assert_close(pose[0, 0, :3], torch.tensor([4.0, 0.0, 0.0]), atol=1e-6, rtol=0.0)
+        rotated_centroid = pose[0, 0, :3] + torch.tensor([-2.0, 0.0, 0.0])
+        torch.testing.assert_close(rotated_centroid, centroid[0], atol=1e-6, rtol=0.0)
+
+    def test_group_delta_moves_descendant_with_sampled_subtree(self):
+        reference = torch.tensor(
+            [
+                [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            ]
+        )
+        centroids = torch.tensor(
+            [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        )
+        samples = torch.zeros(1, 1, 6)
+        samples[0, 0, 5] = torch.pi
+
+        poses = apply_group_member_pose_deltas_wxyz(
+            reference,
+            centroids,
+            samples,
+            sampled_member_indices=torch.tensor([1]),
+            owner_sample_indices=torch.tensor([-1, 0, 0]),
+        )
+
+        torch.testing.assert_close(poses[0, 0], reference[0])
+        torch.testing.assert_close(poses[0, 1, :3], torch.tensor([4.0, 0.0, 0.0]), atol=1e-6, rtol=0.0)
+        torch.testing.assert_close(poses[0, 2, :3], torch.tensor([1.0, 0.0, 0.0]), atol=1e-6, rtol=0.0)
+
     def test_pose_delta_batch_uses_wxyz_axis_angle(self):
         reference = torch.tensor([[1.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0]])
         samples = torch.zeros(2, 1, 6)

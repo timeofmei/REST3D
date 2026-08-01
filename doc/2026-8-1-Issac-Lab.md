@@ -2,7 +2,8 @@
 
 日期：2026-08-01
 状态：A–B 阶段已完成；C 阶段验证实现已完成，但实际场景的通用凸分解验证未通过；
-D 阶段已启动，公共 CEM 与合成批量 GPU smoke 已完成，真实局部组资产迁移尚未完成；
+D 阶段进行中，公共 CEM、通用物理资产、scene-tree 局部组规划及两个实际局部组的
+批量 GPU 最小链路已完成；正式 Stage 3 CLI 集成与同输入旧后端对比尚未完成；
 E–G 阶段尚未开始。
 
 ## 1. 目标与边界
@@ -526,8 +527,8 @@ PhysX context、state/contact CUDA tensor、NVRTC 12.8 和 GPU broadphase 检查
 
 #### D 阶段当前进展（2026-08-01）
 
-在提交 C 阶段后已经启动 D，但尚未进入 E。当前完成的是局部 CEM 的公共逻辑与
-Isaac Lab 合成批量链路，不是实际 Stage 3 局部组迁移完成：
+在提交 C 阶段后已经启动 D，但尚未进入 E。第一批完成的是局部 CEM 的公共逻辑与
+Isaac Lab 合成批量链路：
 
 - 将纯 NumPy `CEMOptimizer` 从含 Isaac Gym 顶层依赖的模块中抽离到
   `rest3d/optim/cem.py`；旧 Isaac Gym 调用点继续导入同一实现，不复制业务逻辑；
@@ -575,10 +576,81 @@ bash scripts/run_isaaclab_local_cem_smoke.sh \
   --seed 17
 ```
 
-当前 D 阶段仍缺少：按 scene tree 选择真实局部组、把实际 URDF/mesh/collision 资产
-批量装入候选环境、使用真实几何计算 placement penetration、保存实际局部组最优结果
-并与旧后端做同输入对比。C 阶段实际凸分解场景的 `5/6` 稳定失败也仍然存在；本次
-合成 smoke 不代表该问题已经修复，不能据此进入 E 阶段。
+该最小链路已提交为 `7ff9ae5 Start Isaac Lab local CEM migration`。提交之后继续完成了
+以下尚未提交的 D 阶段小步骤：
+
+1. 通用物理资产描述：从场景清单和网格几何推导质心、质量和完整惯量矩阵；密闭网格
+   使用体积，非密闭网格使用包围盒体积与统一实体比例回退；统一采用上下限正则化，
+   并生成新的派生 URDF。策略不检查对象名称，也不改写源 URDF、OBJ 或既有输出。
+2. 实际局部组规划：根据 scene tree 递归构造组成员，采样直接可移动子对象并记录由其
+   刚性带动的后代；用 AABB 距离和可移动承托祖先选择必要上下文。当前实际清单得到
+   两组，两个候选场景的“组成员 + 上下文”都覆盖原场景全部 6 个对象。
+3. 实际局部 CEM：每个候选环境加载派生 URDF 和凸分解碰撞体；局部组根和上下文保持
+   kinematic，直接子对象为 6-DoF 采样变量，后代按所属直接子对象传播刚性变换；动态
+   局部成员与其余全部活动对象建立接触查询，GPU state/contact tensor 共同计算稳定性、
+   layout、速度和放置/沉降穿插能量。
+4. 可复现性：第一轮的第 0 个候选强制为零扰动基线；跨轮保存全程最优候选，而不是
+   默认取最后一轮；同时保存 REST3D/Isaac Lab 坐标下的放置与沉降状态、每轮指标、
+   质量/惯量读回和 GPU 性能。固定对象漂移、对象集合和 tensor device 都有运行时断言。
+
+通用物理资产输出与局部组规划位于：
+
+```text
+output/isaaclab_migration/cam22_physics_assets_phase_d_v1/
+output/isaaclab_migration/cam22_local_group_plan_phase_d_v2/
+```
+
+实际局部组权威运行均使用 16 个候选、2 轮 CEM、每轮 60 个 PhysX step：
+
+| 指标 | 局部组 0 | 局部组 1 |
+| --- | ---: | ---: |
+| 每环境活动对象数 | `6` | `6` |
+| 采样对象数 / action 维度 | `1 / 6` | `3 / 18` |
+| state tensor | `[16, 6, 13]`，`cuda:0` | `[16, 6, 13]`，`cuda:0` |
+| GPU simulation / pipeline / broadphase | `GPU / GPU / GPU` | `GPU / GPU / GPU` |
+| 总 PhysX steps | `120` | `120` |
+| 仿真耗时 / 吞吐 | `0.848 s / 141.6 steps/s` | `0.930 s / 129.1 steps/s` |
+| 整卡显存采样峰值 | `4115 MiB` | `4115 MiB` |
+| 固定对象最大位置 / 旋转漂移 | `5.14e-7 m / 0 rad` | `6.45e-7 m / 0 rad` |
+| 全程最优 reward | `-0.699181` | `-0.236969` |
+| 全程最优候选 | 第二轮采样候选 | 第一轮零扰动基线 |
+| 最优放置 / 沉降穿插 | `0.0045 / 0.0423 mm` | `2.8544 / 0.0279 mm` |
+
+结果、Kit 日志、NPZ 指标和完整最优候选分别位于：
+
+```text
+output/isaaclab_migration/cam22_real_local_cem_group0_phase_d_v2/
+output/isaaclab_migration/cam22_real_local_cem_group1_phase_d_v2/
+```
+
+可复现命令（每次都必须更换为执行前不存在的新输出目录）：
+
+```bash
+bash scripts/run_isaaclab_real_local_cem.sh \
+  output/isaaclab_migration/cam22_physics_assets_phase_d_v1/physics_assets.json \
+  output/isaaclab_migration/cam22_local_group_plan_phase_d_v2/local_groups.json \
+  0 output/isaaclab_migration/cam22_real_local_cem_group0_phase_d_reproduction_v1 \
+  --num-envs 16 --cem-iters 2 --settle-steps 60 --early-steps 15 --seed 23
+
+bash scripts/run_isaaclab_real_local_cem.sh \
+  output/isaaclab_migration/cam22_physics_assets_phase_d_v1/physics_assets.json \
+  output/isaaclab_migration/cam22_local_group_plan_phase_d_v2/local_groups.json \
+  1 output/isaaclab_migration/cam22_real_local_cem_group1_phase_d_reproduction_v1 \
+  --num-envs 16 --cem-iters 2 --settle-steps 60 --early-steps 15 --seed 29
+```
+
+本轮验证为 `34 passed`；相关模块同时通过 `rest3d` Python 3.11 和旧 `gym`
+Python 3.8 的 `py_compile`，旧环境可导入同一公共 CEM/资产/局部组模块。两个实际
+运行各有 22 项 GPU、集合、物理属性、CEM 与输出断言全部通过。WSL headless 的
+Vulkan renderer 仍不可用，但 GPU PhysX、GPU broadphase、CUDA state/contact tensor
+和真实 `sm_120` PyTorch 运算均通过，因此没有发生物理或 tensor pipeline CPU 回退。
+
+当前物理属性是“只基于几何的通用初始值”：统一标称密度不能识别真实材料或空心
+结构，质量绝对值仍是后续需要校准和做敏感性分析的模型假设，不能把本次通过解释为
+物体质量已经真实。D 阶段也仍缺少正式 Stage 3 `--backend isaac-lab` 局部优化入口、
+将最优结果接回后续流程，以及与 Isaac Gym 的同输入对比。C 阶段实际凸分解场景的
+`5/6` 稳定失败尚未重新做完整场景判定；局部 CEM 结果不代表 C 已修复。以上工作均
+未进入组根全局采样或全对象全局联合评估，因此没有进入 E 阶段。
 
 ### E. 符合论文的全对象全局 CEM
 

@@ -55,6 +55,12 @@ def quaternion_multiply_wxyz(left, right):
     )
 
 
+def quaternion_conjugate_wxyz(quaternion):
+    if quaternion.shape[-1] != 4:
+        raise ValueError("quaternion final dimension must be 4")
+    return torch.cat((quaternion[..., :1], -quaternion[..., 1:]), dim=-1)
+
+
 def axis_angle_to_quaternion_wxyz(axis_angle):
     if axis_angle.shape[-1] != 3:
         raise ValueError("axis-angle final dimension must be 3")
@@ -111,6 +117,109 @@ def apply_pose_deltas_wxyz(reference_poses, samples):
         quaternion_multiply_wxyz(reference[..., 3:7], delta_quaternion)
     )
     return torch.cat((position, orientation), dim=-1)
+
+
+def apply_pose_deltas_about_centroids_wxyz(
+    reference_root_poses, centroid_offsets, samples
+):
+    """Apply pose deltas while keeping each mesh centroid as its rotation pivot."""
+
+    if reference_root_poses.ndim != 2 or reference_root_poses.shape[-1] != 7:
+        raise ValueError("reference_root_poses must have shape [objects, 7]")
+    if centroid_offsets.shape != (reference_root_poses.shape[0], 3):
+        raise ValueError("centroid_offsets must have shape [objects, 3]")
+    if not (
+        reference_root_poses.device == centroid_offsets.device == samples.device
+    ):
+        raise ValueError("reference poses, centroids, and samples must share a device")
+    updated = apply_pose_deltas_wxyz(reference_root_poses, samples)
+    reference = reference_root_poses.unsqueeze(0).expand(samples.shape[0], -1, -1)
+    offsets = centroid_offsets.unsqueeze(0).expand(samples.shape[0], -1, -1)
+    reference_centroids = reference[..., :3] + quaternion_rotate_wxyz(
+        reference[..., 3:7], offsets
+    )
+    updated_centroids = reference_centroids + samples[..., :3]
+    root_positions = updated_centroids - quaternion_rotate_wxyz(
+        updated[..., 3:7], offsets
+    )
+    return torch.cat((root_positions, updated[..., 3:7]), dim=-1)
+
+
+def apply_group_member_pose_deltas_wxyz(
+    reference_member_poses,
+    centroid_offsets,
+    samples,
+    sampled_member_indices,
+    owner_sample_indices,
+):
+    """Move sampled children and all of their descendants as rigid subtrees."""
+
+    member_count = reference_member_poses.shape[0]
+    if reference_member_poses.shape != (member_count, 7):
+        raise ValueError("reference_member_poses must have shape [members, 7]")
+    if centroid_offsets.shape != (member_count, 3):
+        raise ValueError("centroid_offsets must have shape [members, 3]")
+    if samples.ndim != 3 or samples.shape[-1] != 6:
+        raise ValueError("samples must have shape [environments, sampled_children, 6]")
+    if sampled_member_indices.shape != (samples.shape[1],):
+        raise ValueError("sampled_member_indices must identify every sampled child")
+    if owner_sample_indices.shape != (member_count,):
+        raise ValueError("owner_sample_indices must identify every member's sampled owner")
+    if not (
+        reference_member_poses.device
+        == centroid_offsets.device
+        == samples.device
+        == sampled_member_indices.device
+        == owner_sample_indices.device
+    ):
+        raise ValueError("all group pose tensors must share a device")
+    owner_values = owner_sample_indices.detach().cpu().tolist()
+    if any(owner < -1 or owner >= samples.shape[1] for owner in owner_values):
+        raise ValueError("owner sample indices are out of range")
+
+    owner_reference = reference_member_poses[sampled_member_indices]
+    owner_centroids = centroid_offsets[sampled_member_indices]
+    owner_updated = apply_pose_deltas_about_centroids_wxyz(
+        owner_reference, owner_centroids, samples
+    )
+    reference_owner_quaternion = owner_reference[:, 3:7].unsqueeze(0).expand(
+        samples.shape[0], -1, -1
+    )
+    world_delta_quaternion = normalize_quaternion_wxyz(
+        quaternion_multiply_wxyz(
+            owner_updated[..., 3:7],
+            quaternion_conjugate_wxyz(reference_owner_quaternion),
+        )
+    )
+    owner_reference_centroid = owner_reference[:, :3] + quaternion_rotate_wxyz(
+        owner_reference[:, 3:7], owner_centroids
+    )
+    owner_updated_centroid = owner_reference_centroid.unsqueeze(0) + samples[..., :3]
+
+    result = reference_member_poses.unsqueeze(0).expand(
+        samples.shape[0], -1, -1
+    ).clone()
+    for member_index, owner_index in enumerate(owner_values):
+        if owner_index < 0:
+            continue
+        delta_quaternion = world_delta_quaternion[:, owner_index]
+        reference_position = reference_member_poses[member_index, :3].unsqueeze(0).expand(
+            samples.shape[0], -1
+        )
+        relative_position = (
+            reference_position
+            - owner_reference_centroid[owner_index].unsqueeze(0)
+        )
+        result[:, member_index, :3] = quaternion_rotate_wxyz(
+            delta_quaternion, relative_position
+        ) + owner_updated_centroid[:, owner_index]
+        reference_quaternion = reference_member_poses[
+            member_index, 3:7
+        ].unsqueeze(0).expand(samples.shape[0], -1)
+        result[:, member_index, 3:7] = normalize_quaternion_wxyz(
+            quaternion_multiply_wxyz(delta_quaternion, reference_quaternion)
+        )
+    return result
 
 
 def _validate_state_batches(placed, early, settled, reference_poses):
