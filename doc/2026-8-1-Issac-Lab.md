@@ -1,7 +1,7 @@
 # REST3D Stage 3：Isaac Lab 迁移计划
 
 日期：2026-08-01
-状态：A 阶段已完成；Isaac Lab replay、实际场景与 CEM 迁移（B–G）尚未开始。
+状态：A–B 阶段已完成；实际场景稳定性验证与 CEM 迁移（C–G）尚未开始。
 
 ## 1. 目标与边界
 
@@ -324,19 +324,91 @@ B 阶段只能先做无渲染 headless replay；若任务需要视频或相机�
 6. 先用合成的两个刚体场景测试，再读取实际 Stage 3 pose 进行 replay。
 7. 视频为可选项；headless 状态验证不能依赖 GUI 或视频成功。
 
-实际场景命令的目标形式如下，最终参数名以实现为准：
+实际场景入口参数如下：
 
 ```bash
 conda activate isaaclab
 python scripts/replay_in_simulator.py \
   --backend isaac-lab \
   --scene-tree output/cam_22_foreground_run1/stage2/scene_tree.json \
-  --state-dir output/cam_22_foreground_run1/stage3/global_scene \
+  --scene-dir output/cam_22_foreground_run1/stage3/global_scene \
   --output-dir output/isaaclab_migration/cam22_replay_v1 \
   --headless --settle-steps 60
 ```
 
 `output/cam_22_foreground_run1` 全程只读，示例输出目录必须在运行前不存在。
+
+#### B 阶段执行结果（2026-08-01）
+
+B 阶段已完成，C 阶段没有启动。replay 入口现在通过 `--backend isaac-gym` 或
+`--backend isaac-lab` 启动隔离的后端进程，避免两套 runtime 的导入顺序和 Python
+版本冲突。两个后端共享严格验证的 replay scene spec；输入和输出已拆分为
+`--scene-dir` 与 `--output-dir`，输出目录存在或位于只读输入目录内时直接失败。
+
+公共输入层完成了以下工作：
+
+- OBJ、URDF 与 scene tree 对象集合严格匹配，缺失或未声明资产不再静默跳过；
+- fixed/movable 只依据 scene tree 的 `type` 和 `attach`/`hang` 关系，不依据对象名；
+- REST3D Y-up 与 Isaac Lab Z-up 使用固定右手坐标变换；位置、四元数、线速度和角
+  速度均有往返测试；
+- fixed 资产在 Isaac Lab 中使用保留碰撞的 kinematic rigid body，不关闭与子对象
+  或其他对象的碰撞；
+- 每次 replay 保存完整的初末/逐帧 root state、对象集合、device、耗时和显存数据。
+
+实现过程中发现 PyTorch cu128 wheel 目录同时包含 NVRTC 12.6 主库与 12.8 alternate
+库。Kit 在 Torch 之前加载 12.6 后，`RigidObjectData` 的首个 `sm_120` JIT kernel 会
+报 `invalid value for --gpu-architecture`。当前机器已有 CUDA Toolkit 12.8，因此
+wrapper 只对 Isaac Lab replay 子进程预加载
+`/usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc.so.12`；没有修改 Conda 环境、
+动态链接器配置或 shell profile。修复后真实 NVRTC CUDA kernel 与 replay 均通过。
+
+合成场景验证包含一个固定碰撞支撑体和一个动态刚体：
+
+| 指标 | 结果 |
+| --- | ---: |
+| 对象 / 固定 / 可移动 | `2 / 1 / 1` |
+| 状态 tensor | `[121, 2, 13]`，`cuda:0` |
+| 动态体位移 | `0.300000 m`，落到支撑面后静止 |
+| 固定体位移 / 最终速度 | `0 m / 0 m/s` |
+| 120 步耗时 | `0.928 s`，`129.249 steps/s` |
+| 整卡显存采样峰值 | `3949 MiB` |
+
+只读实际输入 `output/cam_22_foreground_run1/stage3/global_scene` 的 replay 结果为：
+
+| 指标 | 结果 |
+| --- | ---: |
+| OBJ / URDF / 已加载对象 | `6 / 6 / 6` |
+| 状态 tensor | `[121, 6, 13]`，`cuda:0` |
+| GPU simulation / tensor pipeline / broadphase | `GPU / GPU / GPU` |
+| 资产转换耗时 | `2.894 s` |
+| 120 步耗时 | `1.024 s`，`117.142 steps/s` |
+| 总耗时 | `6.157 s` |
+| 整卡显存采样峰值 | `3949 MiB` |
+| 逐对象平移范围 | `0.00517–0.03670 m` |
+
+结果目录为：
+
+```text
+output/isaaclab_migration/cam22_replay_phase_b_v1/
+```
+
+Kit 日志记录非空 CUDA handle、CUDA ordinal 0 和 PhysX tensor context device 0，且
+没有 GPU solver/broadphase 回退。当前使用通用 `convex_hull` 作为 B 阶段最小 replay
+近似；该次平移结果不能替代 C 阶段的逐对象旋转、碰撞质量和 60 帧稳定性验证。
+
+旧 Isaac Gym 后端也用同一合成输入实际回归：GPU PhysX 启用，因旧 PyTorch 不支持
+`sm_120` 而按既有策略使用 CPU tensor pipeline，120 步正常完成。两个后端的结果
+均写入各自的新目录，实际输入目录在测试时间内没有新增或修改文件。
+
+可复现命令：
+
+```bash
+bash scripts/run_isaaclab_replay.sh \
+  output/cam_22_foreground_run1/stage2/scene_tree.json \
+  output/cam_22_foreground_run1/stage3/global_scene \
+  output/isaaclab_migration/cam22_replay_phase_b_reproduction_v1 \
+  --settle-steps 120
+```
 
 ### C. 六对象完整场景稳定性验证
 

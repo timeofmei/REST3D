@@ -81,3 +81,21 @@ The current WSL Vulkan loader enumerates only llvmpipe, so Kit logs a graphics
 device enumeration error. Headless CUDA PhysX and tensor operations work, but
 rendering is not validated and must remain disabled until the Vulkan path is
 fixed or tested on an officially supported host.
+
+## NVRTC for runtime-generated PyTorch kernels
+
+Isaac Sim can load the CUDA 12.6 NVRTC library before PyTorch. Precompiled
+PyTorch CUDA kernels still work, but a runtime-generated kernel then fails on
+the RTX 5090 with `invalid value for --gpu-architecture`. The tested machine
+already has CUDA Toolkit 12.8, so replay scopes its NVRTC library to the child
+process:
+
+```bash
+LD_PRELOAD=/usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc.so.12 \
+LD_LIBRARY_PATH=/usr/local/cuda-12.8/targets/x86_64-linux/lib:/usr/lib/wsl/lib \
+python your_isaaclab_entry.py
+```
+
+`scripts/run_isaaclab_replay.sh` applies this automatically. It does not
+persist either variable or modify the existing Conda environments. Override
+`ISAACLAB_NVRTC_LIBRARY` only when using another verified CUDA 12.8 location.
