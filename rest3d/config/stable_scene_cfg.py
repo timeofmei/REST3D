@@ -58,6 +58,7 @@ class StableSceneCfg:
     cem_warm_start: str = "prev_mean_std"
     cem_warm_start_alpha: float = 0.8
     cem_pop_size_decay: float = 0.0
+    cem_seed: Optional[int] = None
     reward_threshold: float = -0.01
 
     # ----------------------------------------------------------------

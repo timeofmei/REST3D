@@ -12,11 +12,19 @@ from .stability import (
     evaluate_replay_stability,
     quaternion_geodesic_distance_wxyz,
 )
+from .local_cem import (
+    LocalCEMEnergyWeights,
+    apply_pose_deltas_wxyz,
+    evaluate_local_cem_energy,
+)
 
 __all__ = [
     "ReplayObjectSpec",
     "ReplaySceneSpec",
     "StabilityMetrics",
+    "LocalCEMEnergyWeights",
+    "apply_pose_deltas_wxyz",
+    "evaluate_local_cem_energy",
     "evaluate_replay_stability",
     "lab_states_to_rest",
     "load_replay_scene",

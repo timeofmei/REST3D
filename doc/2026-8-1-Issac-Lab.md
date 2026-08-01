@@ -2,7 +2,8 @@
 
 日期：2026-08-01
 状态：A–B 阶段已完成；C 阶段验证实现已完成，但实际场景的通用凸分解验证未通过；
-D–G 阶段尚未开始。
+D 阶段已启动，公共 CEM 与合成批量 GPU smoke 已完成，真实局部组资产迁移尚未完成；
+E–G 阶段尚未开始。
 
 ## 1. 目标与边界
 
@@ -430,8 +431,9 @@ CEM 参数掩盖问题。
 
 #### C 阶段当前执行结果（2026-08-01）
 
-阶段 B 已提交为 `7f70ccb`（`Add Isaac Lab replay backend`）。随后启动 C 阶段，
-没有开始 D 阶段或修改 CEM。当前实现增加了以下通用验证能力：
+阶段 B 已提交为 `7f70ccb`（`Add Isaac Lab replay backend`）。随后启动 C 阶段；
+C 阶段实现最终提交为 `a841725`（`Add full-scene stability validation`）。当前实现增加了
+以下通用验证能力：
 
 - `--stability-evaluation-steps` 明确指定相对第 0 帧的评估步，默认 `60`；
 - `--position-stability-threshold` 和 `--rotation-stability-threshold` 默认分别为
@@ -521,6 +523,62 @@ PhysX context、state/contact CUDA tensor、NVRTC 12.8 和 GPU broadphase 检查
 5. 对稳定性、旋转、速度、placement penetration、settled penetration 和 layout 各项
    做 shape/device/数值一致性测试。
 6. 固定随机种子，保存最优候选和每轮摘要，避免只凭最终 mesh 判断。
+
+#### D 阶段当前进展（2026-08-01）
+
+在提交 C 阶段后已经启动 D，但尚未进入 E。当前完成的是局部 CEM 的公共逻辑与
+Isaac Lab 合成批量链路，不是实际 Stage 3 局部组迁移完成：
+
+- 将纯 NumPy `CEMOptimizer` 从含 Isaac Gym 顶层依赖的模块中抽离到
+  `rest3d/optim/cem.py`；旧 Isaac Gym 调用点继续导入同一实现，不复制业务逻辑；
+- 保留 CEM、NES、warm start 和 iCEM elite carry，并补充维度、有限值、标准差等
+  输入校验；`cem_seed` 和旧后端的 `--cem-seed` 提供确定性采样；
+- 新增后端无关的 WXYZ 四元数 6-DoF 位姿组合及局部能量计算，覆盖 pose/rotation
+  stability、pose/rotation layout、早期速度、placement penetration 和 settled
+  penetration；
+- 合成 smoke 使用 `RigidObjectCollection` 在每个候选环境中放置一个通用固定承托体
+  和一个动态子刚体，执行批量 root-state 写入/读回、真实 GPU PhysX 步进、CUDA
+  contact tensor、能量计算和 elite update；fixture 名称只描述物理角色，不引用实际
+  测试场景对象名；
+- 公共 CEM 和局部能量已有 9 个单元测试；仓库测试发现共 27 项通过；旧 `gym`
+  Python 3.8 进程在局部 preload 下可导入抽离后的同一 `CEMOptimizer`。
+
+权威 smoke 使用 32 个并行候选、3 轮 CEM、每轮 60 个 PhysX step，结果为：
+
+| 指标 | 结果 |
+| --- | ---: |
+| 每环境刚体数 / 并行环境数 | `2 / 32` |
+| state tensor | `[32, 2, 13]`，`cuda:0` |
+| contact tensor | `cuda:0` |
+| GPU simulation / tensor pipeline / broadphase | `GPU / GPU / GPU` |
+| 总 PhysX steps | `180` |
+| 仿真耗时 / 吞吐 | `1.067 s / 168.684 steps/s` |
+| 整卡显存采样峰值 | `4013 MiB` |
+| 固定组根最大位移 | `0.0 m` |
+| 每轮最佳 reward | `-0.250543, -0.150859, -0.072671` |
+
+结果和机器可读指标位于：
+
+```text
+output/isaaclab_migration/local_cem_phase_d_smoke_v4/
+```
+
+可复现命令（输出目录必须在执行前不存在）：
+
+```bash
+bash scripts/run_isaaclab_local_cem_smoke.sh \
+  output/isaaclab_migration/local_cem_phase_d_reproduction_v1 \
+  --num-envs 32 \
+  --cem-iters 3 \
+  --settle-steps 60 \
+  --early-steps 15 \
+  --seed 17
+```
+
+当前 D 阶段仍缺少：按 scene tree 选择真实局部组、把实际 URDF/mesh/collision 资产
+批量装入候选环境、使用真实几何计算 placement penetration、保存实际局部组最优结果
+并与旧后端做同输入对比。C 阶段实际凸分解场景的 `5/6` 稳定失败也仍然存在；本次
+合成 smoke 不代表该问题已经修复，不能据此进入 E 阶段。
 
 ### E. 符合论文的全对象全局 CEM
 
