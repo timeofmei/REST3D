@@ -44,6 +44,7 @@ class ReplaySceneSpec:
     objects: tuple[ReplayObjectSpec, ...]
     bounds_min_rest: tuple[float, float, float]
     bounds_max_rest: tuple[float, float, float]
+    asset_prefix: str = ""
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -112,7 +113,38 @@ def _is_fixed(node: str, roots: set[str], node_info: dict[str, dict[str, str]]) 
     )
 
 
-def load_replay_scene(scene_tree_path: str | Path, scene_dir: str | Path) -> ReplaySceneSpec:
+def _match_asset_names(
+    paths: list[Path], declared_names: set[str], *, allow_unmatched: bool = False
+) -> tuple[dict[str, Path], str]:
+    """Map optionally prefixed filenames to scene-tree names without name rules."""
+
+    matched: dict[str, Path] = {}
+    prefixes: list[str] = []
+    for path in paths:
+        candidates = [name for name in declared_names if path.stem.endswith(name)]
+        if not candidates:
+            if allow_unmatched:
+                continue
+            raise ValueError(f"asset is not declared in the scene tree: {path.name}")
+        longest = max(len(name) for name in candidates)
+        candidates = [name for name in candidates if len(name) == longest]
+        if len(candidates) != 1:
+            raise ValueError(f"asset name is ambiguous: {path.name}")
+        logical_name = candidates[0]
+        if logical_name in matched:
+            raise ValueError(f"multiple assets resolve to scene object: {logical_name}")
+        matched[logical_name] = path
+        prefixes.append(path.stem[: -len(logical_name)])
+    common_prefix = prefixes[0] if prefixes and len(set(prefixes)) == 1 else ""
+    return matched, common_prefix
+
+
+def load_replay_scene(
+    scene_tree_path: str | Path,
+    scene_dir: str | Path,
+    *,
+    allow_extra_urdf: bool = False,
+) -> ReplaySceneSpec:
     """Load and strictly validate matching OBJ/URDF assets without modifying them."""
 
     scene_tree_path = Path(scene_tree_path).expanduser().resolve(strict=True)
@@ -125,20 +157,24 @@ def load_replay_scene(scene_tree_path: str | Path, scene_dir: str | Path) -> Rep
         raise FileNotFoundError(f"URDF directory not found: {urdf_dir}")
 
     declared, roots, node_info = _read_scene_tree(scene_tree_path)
-    obj_by_name = {path.stem: path for path in sorted(obj_dir.glob("*.obj"))}
-    urdf_by_name = {path.stem: path for path in sorted(urdf_dir.glob("*.urdf"))}
-    if not obj_by_name:
+    obj_paths = sorted(obj_dir.glob("*.obj"))
+    urdf_paths = sorted(urdf_dir.glob("*.urdf"))
+    if not obj_paths:
         raise ValueError(f"no OBJ assets found in: {obj_dir}")
-
-    unknown = set(obj_by_name) - declared
-    if unknown:
-        raise ValueError(f"OBJ assets are not declared in the scene tree: {sorted(unknown)}")
+    obj_by_name, obj_prefix = _match_asset_names(obj_paths, declared)
+    urdf_by_name, urdf_prefix = _match_asset_names(
+        urdf_paths, declared, allow_unmatched=allow_extra_urdf
+    )
     missing_urdf = set(obj_by_name) - set(urdf_by_name)
     if missing_urdf:
         raise FileNotFoundError(f"URDF assets missing for: {sorted(missing_urdf)}")
     extra_urdf = set(urdf_by_name) - set(obj_by_name)
-    if extra_urdf:
+    if extra_urdf and not allow_extra_urdf:
         raise ValueError(f"URDF assets have no matching OBJ: {sorted(extra_urdf)}")
+    if obj_prefix and urdf_prefix and obj_prefix != urdf_prefix:
+        raise ValueError(
+            f"OBJ and URDF asset prefixes differ: {obj_prefix!r} != {urdf_prefix!r}"
+        )
 
     objects: list[ReplayObjectSpec] = []
     bounds_min: list[np.ndarray] = []
@@ -166,6 +202,7 @@ def load_replay_scene(scene_tree_path: str | Path, scene_dir: str | Path) -> Rep
         objects=tuple(objects),
         bounds_min_rest=tuple(float(value) for value in scene_min),
         bounds_max_rest=tuple(float(value) for value in scene_max),
+        asset_prefix=obj_prefix or urdf_prefix,
     )
 
 
@@ -203,6 +240,19 @@ def rest_poses_to_lab(poses_wxyz: np.ndarray) -> np.ndarray:
     result[..., 3:7] = _normalize_quaternions(
         _quat_multiply_wxyz(REST_TO_LAB_QUAT_WXYZ, poses[..., 3:7])
     )
+    return result
+
+
+def rest_states_to_lab(states_wxyz: np.ndarray) -> np.ndarray:
+    """Map REST3D Y-up root states to Isaac Lab Z-up coordinates."""
+
+    states = np.asarray(states_wxyz, dtype=np.float64)
+    if states.shape[-1] != 13:
+        raise ValueError(f"expected root states with final dimension 13, got {states.shape}")
+    result = states.copy()
+    result[..., :7] = rest_poses_to_lab(states[..., :7])
+    result[..., 7:10] = states[..., 7:10] @ REST_TO_LAB_ROTATION.T
+    result[..., 10:13] = states[..., 10:13] @ REST_TO_LAB_ROTATION.T
     return result
 
 

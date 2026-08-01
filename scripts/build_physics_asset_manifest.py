@@ -23,6 +23,11 @@ def _parse_args():
     parser.add_argument("--minimum-mass-kg", type=float, default=0.02)
     parser.add_argument("--maximum-mass-kg", type=float, default=100.0)
     parser.add_argument("--fallback-solid-fraction", type=float, default=0.15)
+    parser.add_argument(
+        "--allow-extra-urdf",
+        action="store_true",
+        help="Allow URDFs for declared nodes that have no matching OBJ",
+    )
     args = parser.parse_args()
     args.scene_dir = args.scene_dir.expanduser().resolve(strict=True)
     args.scene_tree = args.scene_tree.expanduser().resolve(strict=True)
@@ -42,7 +47,11 @@ def main() -> int:
         fallback_solid_fraction=args.fallback_solid_fraction,
     )
     policy.validate()
-    scene = load_replay_scene(args.scene_tree, args.scene_dir)
+    scene = load_replay_scene(
+        args.scene_tree,
+        args.scene_dir,
+        allow_extra_urdf=args.allow_extra_urdf,
+    )
     urdf_dir = args.output_dir / "urdf_files"
     urdf_dir.mkdir()
     records = {}
@@ -64,6 +73,7 @@ def main() -> int:
         "scene_tree": str(scene.scene_tree_path),
         "read_only_scene_dir": str(scene.scene_dir),
         "object_count": len(scene.objects),
+        "asset_prefix": scene.asset_prefix,
         "policy": asdict(policy),
         "objects": records,
     }

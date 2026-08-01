@@ -23,6 +23,11 @@ def _parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--physics-assets", type=Path, required=True)
     parser.add_argument("--local-groups", type=Path, required=True)
+    parser.add_argument(
+        "--initial-states",
+        type=Path,
+        help="Optional full-scene REST3D WXYZ root-state JSON from a prior local group",
+    )
     parser.add_argument("--group-index", type=int, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--num-envs", type=int, default=16)
@@ -63,14 +68,30 @@ def _parse_args():
         parser.error("--group-index is outside the local group plan")
     if set(physics_assets["objects"]) != set(local_groups["scene_names"]):
         parser.error("physics asset and local group object sets differ")
+    initial_states = None
+    if args.initial_states is not None:
+        args.initial_states = args.initial_states.expanduser().resolve(strict=True)
+        with args.initial_states.open("r", encoding="utf-8") as file:
+            initial_payload = json.load(file)
+        initial_states = initial_payload.get("states_rest_wxyz")
+        if not isinstance(initial_states, dict):
+            parser.error("--initial-states must contain a states_rest_wxyz object")
+        if set(initial_states) != set(local_groups["scene_names"]):
+            parser.error("initial-state object set must exactly match the scene object set")
+        for name, state in initial_states.items():
+            values = np.asarray(state, dtype=np.float64)
+            if values.shape != (13,) or not np.isfinite(values).all():
+                parser.error(f"initial state must contain 13 finite values: {name}")
+            if np.linalg.norm(values[3:7]) < 1.0e-12:
+                parser.error(f"initial state quaternion must be nonzero: {name}")
     output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=False)
     args.output_dir = output_dir
     args.kit_args = f"{args.kit_args} --/log/file={output_dir / 'kit.log'}".strip()
-    return args, physics_assets, local_groups, groups[args.group_index]
+    return args, physics_assets, local_groups, groups[args.group_index], initial_states
 
 
-ARGS, PHYSICS_ASSETS, LOCAL_GROUPS, GROUP = _parse_args()
+ARGS, PHYSICS_ASSETS, LOCAL_GROUPS, GROUP, INITIAL_STATES = _parse_args()
 APP_LAUNCHER = AppLauncher(ARGS)
 SIMULATION_APP = APP_LAUNCHER.app
 
@@ -96,6 +117,7 @@ from rest3d.sim.local_cem import (  # noqa: E402
 from rest3d.sim.replay_scene import (  # noqa: E402
     REST_TO_LAB_QUAT_WXYZ,
     lab_states_to_rest,
+    rest_states_to_lab,
 )
 
 
@@ -357,6 +379,14 @@ def _run() -> dict:
     contact_views, contact_filters = _create_contact_views(collection, active_index)
 
     default_local = collection.data.default_object_state.clone()
+    if INITIAL_STATES is not None:
+        initial_rest = np.asarray(
+            [INITIAL_STATES[name] for name in ACTIVE_NAMES], dtype=np.float64
+        )
+        initial_lab = torch.as_tensor(
+            rest_states_to_lab(initial_rest), dtype=torch.float32, device=ARGS.device
+        )
+        default_local.copy_(initial_lab.unsqueeze(0).expand(ARGS.num_envs, -1, -1))
     reference_member_poses = default_local[0, member_indices, :7]
     centroid_offsets = torch.tensor(
         [PHYSICS_ASSETS["objects"][name]["center_of_mass_m"] for name in MEMBER_NAMES],
@@ -540,6 +570,11 @@ def _run() -> dict:
         "zero_action_baseline_was_evaluated": bool(
             np.isfinite(iteration_records[0]["zero_candidate_reward"])
         ),
+        "initial_state_file_applied": (
+            INITIAL_STATES is not None
+            and bool(torch.isfinite(default_local).all())
+        )
+        or INITIAL_STATES is None,
         "cem_distribution_updated": not np.allclose(cem.mean, initial_mean),
         "cem_best_reward_is_monotonic": all(
             later >= earlier
@@ -611,6 +646,13 @@ def _run() -> dict:
             "gpu": torch.cuda.get_device_name(0),
             "compute_capability": list(torch.cuda.get_device_capability(0)),
             "conda_prefix": os.environ.get("CONDA_PREFIX"),
+        },
+        "inputs": {
+            "physics_assets": str(ARGS.physics_assets),
+            "local_groups": str(ARGS.local_groups),
+            "initial_states": str(ARGS.initial_states)
+            if ARGS.initial_states is not None
+            else None,
         },
         "group": GROUP,
         "simulation": {

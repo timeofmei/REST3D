@@ -9,6 +9,7 @@ from rest3d.sim.replay_scene import (
     lab_states_to_rest,
     load_replay_scene,
     rest_poses_to_lab,
+    rest_states_to_lab,
 )
 
 
@@ -77,6 +78,50 @@ class ReplaySceneTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_replay_scene(tree_path, scene_dir)
 
+    def test_common_prefix_and_optional_extra_urdf_are_supported(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            scene_dir = root / "scene"
+            obj_dir = scene_dir / "obj_files"
+            urdf_dir = scene_dir / "urdf_files"
+            obj_dir.mkdir(parents=True)
+            urdf_dir.mkdir()
+            tree_path = root / "scene_tree.json"
+            tree_path.write_text(
+                json.dumps(
+                    {
+                        "roots": ["support"],
+                        "nodes": ["item"],
+                        "edges": [
+                            {
+                                "child": "item",
+                                "parent": "support",
+                                "relation": "on",
+                                "type": "movable",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (obj_dir / "reconstruction_item.obj").write_text(
+                "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8"
+            )
+            (urdf_dir / "reconstruction_item.urdf").write_text(
+                "<robot/>", encoding="utf-8"
+            )
+            (urdf_dir / "support.urdf").write_text("<robot/>", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "no matching OBJ"):
+                load_replay_scene(tree_path, scene_dir)
+            scene = load_replay_scene(
+                tree_path, scene_dir, allow_extra_urdf=True
+            )
+
+            self.assertEqual(scene.names, ("item",))
+            self.assertEqual(scene.asset_prefix, "reconstruction_")
+            self.assertEqual(scene.objects[0].obj_path.name, "reconstruction_item.obj")
+
     def test_y_up_z_up_pose_and_state_round_trip(self):
         poses_rest = np.array(
             [[1.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0]], dtype=np.float64
@@ -92,6 +137,7 @@ class ReplaySceneTest(unittest.TestCase):
         np.testing.assert_allclose(states_rest[0, :7], poses_rest[0], atol=1e-12)
         np.testing.assert_allclose(states_rest[0, 7:10], [1.0, 2.0, 3.0], atol=1e-12)
         np.testing.assert_allclose(states_rest[0, 10:13], [-4.0, 5.0, 6.0], atol=1e-12)
+        np.testing.assert_allclose(rest_states_to_lab(states_rest), states_lab, atol=1e-12)
 
 
 if __name__ == "__main__":

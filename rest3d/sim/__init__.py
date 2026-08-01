@@ -6,6 +6,7 @@ from .replay_scene import (
     lab_states_to_rest,
     load_replay_scene,
     rest_poses_to_lab,
+    rest_states_to_lab,
 )
 from .stability import (
     StabilityMetrics,
@@ -24,6 +25,13 @@ from .local_groups import (
     LocalGroupSpec,
     ObjectBounds,
     build_local_group_plan,
+)
+from .local_results import (
+    legacy_local_group_payload,
+    local_group_execution_order,
+    make_initial_scene_states,
+    merge_group_candidate_states,
+    validate_scene_states,
 )
 from .physics_assets import (
     PhysicsAssetPolicy,
@@ -47,11 +55,17 @@ __all__ = [
     "apply_pose_deltas_about_centroids_wxyz",
     "apply_group_member_pose_deltas_wxyz",
     "build_local_group_plan",
+    "legacy_local_group_payload",
+    "local_group_execution_order",
+    "make_initial_scene_states",
+    "merge_group_candidate_states",
+    "validate_scene_states",
     "evaluate_local_cem_energy",
     "evaluate_replay_stability",
     "lab_states_to_rest",
     "load_replay_scene",
     "rest_poses_to_lab",
+    "rest_states_to_lab",
     "write_physics_urdf",
     "quaternion_geodesic_distance_wxyz",
 ]
