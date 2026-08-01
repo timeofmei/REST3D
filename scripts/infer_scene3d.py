@@ -487,6 +487,13 @@ def main():
              "to {output_folder}/{image_stem}/stage2/ (default: output)"
     )
     parser.add_argument(
+        "--output_name",
+        type=str,
+        default=None,
+        help="Override the per-image output directory name for a single image. "
+             "Only valid when --image_folder points to one image file."
+    )
+    parser.add_argument(
         "--use_cache",
         action="store_true",
         default=True,
@@ -512,6 +519,15 @@ def main():
     # Build (img_path, output_name) list, mirroring infer_scenetree's logic.
     image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp"}
     entries = []
+    if args.output_name:
+        if args.image_list:
+            parser.error("--output_name cannot be used with --image_list")
+        if not args.image_folder or not os.path.isfile(args.image_folder):
+            parser.error("--output_name requires --image_folder to point to one image file")
+        if os.path.basename(os.path.normpath(args.output_name)) != args.output_name \
+                or args.output_name in {".", ".."}:
+            parser.error("--output_name must be a single directory name, not a path")
+
     if args.image_list:
         with open(args.image_list) as f:
             for line in f:
@@ -536,7 +552,7 @@ def main():
                 found.extend(glob(os.path.join(args.image_folder, f"*{ext}")))
                 found.extend(glob(os.path.join(args.image_folder, f"*{ext.upper()}")))
         for img_path in sorted(found):
-            output_name = os.path.splitext(os.path.basename(img_path))[0]
+            output_name = args.output_name or os.path.splitext(os.path.basename(img_path))[0]
             entries.append((img_path, output_name))
     else:
         raise ValueError("Must provide either --image_folder or --image_list")
