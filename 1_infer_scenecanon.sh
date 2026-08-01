@@ -8,7 +8,7 @@
 #   output/<image_name>/stage1/   (scene tree, masks)
 #   output/<image_name>/stage2/   (3D scene: scene_canon)
 
-INPUT=demo/custom_cartoon_simpson.jpeg
+INPUT=data/my_capture_frame145_centered_meters/images/cam_22.png
 
 CUDA_VISIBLE_DEVICES=0 python scripts/infer_scenetree.py \
     --image_folder "$INPUT" \

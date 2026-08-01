@@ -17,6 +17,11 @@ class StableSceneCfg:
     no_override_com: bool = False
     static: bool = False
     headless: bool = True
+    use_gpu_physics: bool = True
+    # None selects the GPU tensor pipeline only when the installed PyTorch
+    # wheel supports the current GPU.  This lets Isaac Gym Preview 4 run GPU
+    # PhysX on Blackwell while its Python 3.8-era PyTorch tensors stay on CPU.
+    use_gpu_pipeline: Optional[bool] = None
     num_position_iterations: int = 6
     max_depenetration_velocity: float = 5.0
 
@@ -85,7 +90,7 @@ class StableSceneCfg:
     # ----------------------------------------------------------------
     # Wandb (disabled by default)
     # ----------------------------------------------------------------
-    use_wandb: bool = True
+    use_wandb: bool = False
     wandb_project: str = "stable_scene"
     wandb_run_name: str = ""
 

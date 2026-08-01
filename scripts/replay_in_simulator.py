@@ -12,7 +12,10 @@ import time
 import numpy as np
 import torch
 
-from rest3d.models.cem_opt import create_sim_and_viewer
+from rest3d.models.cem_opt import (
+    create_sim_and_viewer,
+    torch_cuda_pipeline_supported,
+)
 from rest3d.models.scene_layout import (
     parse_scene_tree,
     split_to_fixed_movable_set,
@@ -310,36 +313,21 @@ def replay(args):
     # --viser implies headless (no gym popup window)
     headless = args.headless or args.viser
 
-    # Isaac Gym Preview 4 relies on PyTorch for its state tensors.  Do not try
-    # the GPU pipeline when this PyTorch build has no kernels for the installed
-    # GPU (for example, a cu121 build on an RTX 50-series GPU).
-    use_cpu = args.cpu
-    if not use_cpu:
-        if not torch.cuda.is_available():
-            _logger.warning("[replay] CUDA is unavailable; falling back to CPU PhysX")
-            use_cpu = True
-        else:
-            capability = torch.cuda.get_device_capability()
-            arch = f"sm_{capability[0]}{capability[1]}"
-            supported_arches = set(torch.cuda.get_arch_list())
-            # A cubin for an older minor version is usable on later minor
-            # versions of the same GPU generation.  Only reject a GPU newer
-            # than every generation bundled with this PyTorch wheel.
-            supported_capabilities = [
-                (int(a[3:-1]), int(a[-1])) for a in supported_arches
-            ]
-            if capability > max(supported_capabilities):
-                _logger.warning(
-                    "[replay] PyTorch %s supports up to %s, not %s; falling back to CPU PhysX. "
-                    "Pass --cpu to select this explicitly.",
-                    torch.__version__,
-                    f"sm_{max(supported_capabilities)[0]}{max(supported_capabilities)[1]}",
-                    arch,
-                )
-                use_cpu = True
+    # Isaac Gym exposes two independent CUDA switches.  Its bundled PhysX can
+    # run on a Blackwell GPU even though the Python 3.8-compatible PyTorch
+    # wheel cannot execute sm_120 kernels.  In that case keep GPU PhysX and use
+    # host tensors for the state pipeline.
+    use_gpu_physics = not args.cpu and torch.cuda.is_available()
+    pipeline_supported, pipeline_reason = torch_cuda_pipeline_supported()
+    use_gpu_pipeline = use_gpu_physics and pipeline_supported
 
-    if use_cpu:
-        _logger.info("[replay] using CPU PhysX; this is slower but avoids unsupported CUDA kernels")
+    if use_gpu_physics and not use_gpu_pipeline:
+        _logger.warning(
+            "[replay] %s; using GPU PhysX with the CPU tensor pipeline",
+            pipeline_reason,
+        )
+    elif not use_gpu_physics:
+        _logger.info("[replay] using CPU PhysX and the CPU tensor pipeline")
 
     ig = gymapi.acquire_gym()
     sim, viewer = create_sim_and_viewer(
@@ -347,8 +335,8 @@ def replay(args):
         headless=headless,
         num_position_iterations=args.num_position_iterations,
         max_depenetration_velocity=args.max_depenetration_velocity,
-        use_gpu_pipeline=not use_cpu,
-        use_gpu_physics=not use_cpu,
+        use_gpu_pipeline=use_gpu_pipeline,
+        use_gpu_physics=use_gpu_physics,
     )
 
     # ---- load assets ------------------------------------------------
