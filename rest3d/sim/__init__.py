@@ -28,6 +28,7 @@ from .local_groups import (
 )
 from .local_results import (
     legacy_local_group_payload,
+    load_scene_states,
     local_group_execution_order,
     make_initial_scene_states,
     merge_group_candidate_states,
@@ -56,6 +57,7 @@ __all__ = [
     "apply_group_member_pose_deltas_wxyz",
     "build_local_group_plan",
     "legacy_local_group_payload",
+    "load_scene_states",
     "local_group_execution_order",
     "make_initial_scene_states",
     "merge_group_candidate_states",

@@ -34,6 +34,7 @@ def _parse_args():
     parser.add_argument("--density-kg-m3", type=float, default=700.0)
     parser.add_argument("--minimum-mass-kg", type=float, default=0.02)
     parser.add_argument("--maximum-mass-kg", type=float, default=100.0)
+    parser.add_argument("--minimum-bbox-fill-fraction", type=float, default=0.30)
     args = parser.parse_args()
     args.scene_dir = args.scene_dir.expanduser().resolve(strict=True)
     args.output_dir = args.output_dir.expanduser().resolve()
@@ -106,6 +107,8 @@ def _run(args) -> dict:
             str(args.minimum_mass_kg),
             "--maximum-mass-kg",
             str(args.maximum_mass_kg),
+            "--minimum-bbox-fill-fraction",
+            str(args.minimum_bbox_fill_fraction),
             "--allow-extra-urdf",
         ],
         args.output_dir / "build_physics_assets.log",

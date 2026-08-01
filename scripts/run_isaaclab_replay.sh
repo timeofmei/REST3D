@@ -43,6 +43,7 @@ if [[ -n "${LD_PRELOAD:-}" ]]; then
     preload_libraries="${preload_libraries}:${LD_PRELOAD}"
 fi
 
+set +e
 OMNI_KIT_ACCEPT_EULA=YES \
 CONDA_PREFIX="$(dirname "$(dirname "${isaaclab_python}")")" \
 PYTHONPATH="${repo_root}${PYTHONPATH:+:${PYTHONPATH}}" \
@@ -56,3 +57,19 @@ LD_PRELOAD="${preload_libraries}" \
     --headless \
     --device cuda:0 \
     "$@"
+replay_status=$?
+set -e
+
+if [[ -f "${output_dir}/replay_failure.json" ]]; then
+    echo "Isaac Lab replay recorded a failure: ${output_dir}/replay_failure.json" >&2
+    if [[ ${replay_status} -eq 0 ]]; then
+        exit 1
+    fi
+fi
+if [[ ! -f "${output_dir}/replay_results.json" ]]; then
+    echo "Isaac Lab replay did not produce replay_results.json: ${output_dir}" >&2
+    if [[ ${replay_status} -eq 0 ]]; then
+        exit 1
+    fi
+fi
+exit "${replay_status}"

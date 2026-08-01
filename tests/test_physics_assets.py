@@ -50,6 +50,7 @@ class PhysicsAssetTest(unittest.TestCase):
                     minimum_mass_kg=0.01,
                     maximum_mass_kg=1000.0,
                     fallback_solid_fraction=0.25,
+                    minimum_bounding_box_fill_fraction=0.0,
                 ),
             )
 
@@ -87,6 +88,29 @@ class PhysicsAssetTest(unittest.TestCase):
                     mesh_path=mesh_path,
                     properties=properties,
                 )
+
+    def test_thin_watertight_shell_uses_generic_bounding_box_volume_floor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "shell.obj"
+            outer = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+            inner = trimesh.creation.box(extents=(0.99, 0.99, 0.99))
+            inner.invert()
+            trimesh.util.concatenate((outer, inner)).export(path)
+            properties = analyze_physics_asset(
+                path,
+                PhysicsAssetPolicy(
+                    nominal_density_kg_m3=10.0,
+                    minimum_mass_kg=0.01,
+                    maximum_mass_kg=1000.0,
+                    minimum_bounding_box_fill_fraction=0.15,
+                ),
+            )
+
+        self.assertTrue(properties.watertight)
+        self.assertTrue(properties.volume_was_floored)
+        self.assertEqual(properties.volume_source, "watertight_mesh_with_bbox_floor")
+        self.assertAlmostEqual(properties.effective_volume_m3, 0.15)
+        self.assertAlmostEqual(properties.mass_kg, 1.5)
 
 
 if __name__ == "__main__":

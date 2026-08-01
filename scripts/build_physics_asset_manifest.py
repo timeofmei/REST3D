@@ -23,6 +23,7 @@ def _parse_args():
     parser.add_argument("--minimum-mass-kg", type=float, default=0.02)
     parser.add_argument("--maximum-mass-kg", type=float, default=100.0)
     parser.add_argument("--fallback-solid-fraction", type=float, default=0.15)
+    parser.add_argument("--minimum-bbox-fill-fraction", type=float, default=0.30)
     parser.add_argument(
         "--allow-extra-urdf",
         action="store_true",
@@ -45,6 +46,7 @@ def main() -> int:
         minimum_mass_kg=args.minimum_mass_kg,
         maximum_mass_kg=args.maximum_mass_kg,
         fallback_solid_fraction=args.fallback_solid_fraction,
+        minimum_bounding_box_fill_fraction=args.minimum_bbox_fill_fraction,
     )
     policy.validate()
     scene = load_replay_scene(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -34,6 +36,31 @@ def validate_scene_states(
             raise ValueError(f"state must contain 13 finite values: {name}")
         if np.linalg.norm(state[3:7]) < 1.0e-12:
             raise ValueError(f"state quaternion must be nonzero: {name}")
+
+
+def load_scene_states(
+    path: str | Path,
+    scene_names: Sequence[str],
+    *,
+    zero_velocities: bool = True,
+) -> dict[str, list[float]]:
+    """Load the shared full-scene state schema and optionally clear velocities."""
+
+    state_path = Path(path).expanduser().resolve(strict=True)
+    with state_path.open("r", encoding="utf-8") as file:
+        payload = json.load(file)
+    states = payload.get("states_rest_wxyz")
+    if not isinstance(states, dict):
+        raise ValueError("initial-state JSON must contain states_rest_wxyz")
+    validate_scene_states(states, scene_names)
+    result = {
+        name: np.asarray(states[name], dtype=np.float64).tolist()
+        for name in scene_names
+    }
+    if zero_velocities:
+        for state in result.values():
+            state[7:13] = [0.0] * 6
+    return result
 
 
 def merge_group_candidate_states(

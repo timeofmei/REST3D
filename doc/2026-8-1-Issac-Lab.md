@@ -1,9 +1,8 @@
 # REST3D Stage 3：Isaac Lab 迁移计划
 
 日期：2026-08-01
-状态：A–B 阶段已完成；C 阶段验证实现已完成，但实际场景的通用凸分解验证未通过；
-D 阶段已完成：公共 CEM、通用物理资产、scene-tree 局部组规划、实际局部组批量
-GPU 优化、正式 Stage 3 局部入口及旧格式结果回接均已验证；E–G 阶段尚未开始。
+状态：A–D 阶段已完成；D 输出经实际六对象 C 阶段回归，在通用凸分解碰撞下通过
+论文规定的 60 帧 `6/6` 稳定门禁；E–G 阶段尚未开始。
 
 ## 1. 目标与边界
 
@@ -429,7 +428,7 @@ bash scripts/run_isaaclab_replay.sh \
 该阶段不通过时先诊断资产尺度、坐标、collision、质量/惯量和关系表达，不直接调
 CEM 参数掩盖问题。
 
-#### C 阶段当前执行结果（2026-08-01）
+#### C 阶段初始执行结果（2026-08-01）
 
 阶段 B 已提交为 `7f70ccb`（`Add Isaac Lab replay backend`）。随后启动 C 阶段；
 C 阶段实现最终提交为 `a841725`（`Add full-scene stability validation`）。当前实现增加了
@@ -716,11 +715,73 @@ state/contact tensor、`sm_120` 实算、6 对象集合、质量/惯量、初始
 仓库回归更新为 `37 passed`；旧 `gym` Python 3.8 成功加载原 `stable_scene.py`、
 `gymtorch` 和原 CLI，因此本次 backend 分发没有移除旧后端。
 
-当前物理属性仍是“只基于几何的通用初始值”：统一标称密度不能识别真实材料或空心
-结构，质量绝对值仍是后续需要校准和做敏感性分析的模型假设，不能把本次通过解释为
-物体质量已经真实。C 阶段实际凸分解场景的 `5/6` 稳定失败尚未重新做完整场景判定；
-局部 CEM 结果不代表 C 已修复。Isaac Gym/Isaac Lab 同输入数值与性能对比保留在 F，
-组根全局采样和全对象联合物理评估保留在 E；D 没有进入这两个阶段。
+物理属性仍是“只基于几何的通用初始值”：统一标称密度不能识别真实材料或空心
+结构，质量绝对值仍是模型假设，不能把稳定性通过解释为物体质量已经真实。
+Isaac Gym/Isaac Lab 同输入数值与性能对比保留在 F，组根全局采样和全对象联合物理
+评估保留在 E；D 没有进入这两个阶段。
+
+#### D 输出后的 C 阶段复验与修复结果
+
+初始 C 失败由两个通用问题叠加造成：旧全局场景没有采用 D 的局部相对位姿，同时
+所有 URDF 都使用占位的 `1 kg / 0.1 kg·m²` 物理属性。仅替换质量和惯量不能修复错误
+接触；仅替换局部位姿也不能避免薄壳重建网格把物体质量和惯量低估。修复因此包含：
+
+1. replay 接受完整 REST3D WXYZ 初始状态文件，默认将速度清零，并严格要求状态对象
+   集合与场景集合完全一致；
+2. replay 可用 `--urdf-dir` 将只读 Stage 2 OBJ 与 D 派生物理 URDF 配对，不再复制或
+   软链接拼装临时场景；
+3. 通用资产策略记录原始网格体积与包围盒占比。对稀疏/薄壳重建采用包围盒体积的
+   `30%` 作为有效体积下限，再按统一密度计算质量并同比缩放惯量；该策略不读取对象
+   名称，也可用 `--minimum-bbox-fill-fraction` 覆盖；
+4. replay shell 在 Kit 异常退出却未生成结果时返回失败，避免把缺少
+   `replay_results.json` 的运行误判为成功。
+
+`15%`、`20%`、`30%` 灵敏度测试在同一 D 位姿上分别得到 `5/6`、`5/6`、`6/6`；
+随后使用 `30%` 默认值从头重跑正式 D，而不是复用旧质量下的局部结果。正式 D 位于：
+
+```text
+output/isaaclab_migration/cam22_formal_local_groups_phase_d_bbox30_v1/stage3/
+```
+
+它运行 2 个局部组，每组 `16` 个并行环境、`2` 轮 CEM；两个 state tensor 都在
+`cuda:0`，整卡显存采样峰值均为 `4181 MiB`，pipeline 总耗时 `25.40 s`。
+
+权威 C 复验使用每对象 16 个 shape 的 `convex_decomposition`，六对象全部同时作为
+动态刚体参与 GPU PhysX、状态和成对接触采样。结果位于：
+
+```text
+output/isaaclab_migration/cam22_phase_c_after_formal_d_bbox30_decomposition_v1/
+```
+
+| 指标 | 结果 |
+| --- | ---: |
+| 60 帧稳定对象 | `6 / 6` |
+| 60 帧最大位移 / 最大旋转 | `0.051310 m / 0.088316 rad` |
+| 最大穿插深度 | `0.004506 m` |
+| state / pair-contact tensor | `[121, 6, 13] / [121, 6, 6]`，`cuda:0` |
+| GPU simulation / tensor pipeline / broadphase | `GPU / GPU / GPU` |
+| 120 步仿真耗时 / 吞吐 | `1.599 s / 75.06 steps/s` |
+| 整卡显存采样峰值 | `4181 MiB` |
+
+可复现命令如下，`NEW_C_OUTPUT` 必须在运行前不存在：
+
+```bash
+bash scripts/run_isaaclab_replay.sh \
+  output/cam_22_foreground_run1/stage2/scene_tree.json \
+  output/cam_22_foreground_run1/stage2/scene_canon \
+  output/isaaclab_migration/NEW_C_OUTPUT \
+  --urdf-dir \
+    output/isaaclab_migration/cam22_formal_local_groups_phase_d_bbox30_v1/stage3/physics_assets/urdf_files \
+  --initial-states \
+    output/isaaclab_migration/cam22_formal_local_groups_phase_d_bbox30_v1/stage3/local_group_final_states.json \
+  --expected-object-count 6 \
+  --collision-approximation convex_decomposition \
+  --require-stable
+```
+
+结论严格按论文门禁限定在第 60 帧。额外运行到第 120 帧时，一个桌面子对象的旋转为
+`0.112858 rad`，超过同一阈值；因此后续最终稳定性验证仍应关注更长时间余量，不能
+把本次结果表述为无限时域静止。该复验没有启动或实现 E 阶段全局 CEM。
 
 ### E. 符合论文的全对象全局 CEM
 

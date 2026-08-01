@@ -22,8 +22,9 @@ from isaaclab.app import AppLauncher
 from rest3d.sim.replay_scene import (
     lab_states_to_rest,
     load_replay_scene,
-    rest_poses_to_lab,
+    rest_states_to_lab,
 )
+from rest3d.sim.local_results import load_scene_states
 from rest3d.sim.stability import evaluate_replay_stability
 
 
@@ -34,7 +35,12 @@ def _parse_args():
         "--scene-dir",
         type=Path,
         required=True,
-        help="Read-only Stage 3 scene containing obj_files and urdf_files",
+        help="Read-only scene containing obj_files and, unless overridden, urdf_files",
+    )
+    parser.add_argument(
+        "--urdf-dir",
+        type=Path,
+        help="Optional derived physics URDF directory; geometry remains in --scene-dir",
     )
     parser.add_argument(
         "--output-dir",
@@ -43,6 +49,16 @@ def _parse_args():
         help="New result directory; the command fails if it already exists",
     )
     parser.add_argument("--settle-steps", type=int, default=120)
+    parser.add_argument(
+        "--initial-states",
+        type=Path,
+        help="Optional full-scene REST3D WXYZ state JSON, such as D local output",
+    )
+    parser.add_argument(
+        "--preserve-initial-velocities",
+        action="store_true",
+        help="Use velocities from --initial-states instead of starting from rest",
+    )
     parser.add_argument(
         "--stability-evaluation-steps",
         type=int,
@@ -107,8 +123,14 @@ def _parse_args():
         parser.error("--output-dir must be outside the read-only --scene-dir")
     output_dir.mkdir(parents=True, exist_ok=False)
     args.scene_dir = scene_dir
+    if args.urdf_dir is not None:
+        args.urdf_dir = args.urdf_dir.expanduser().resolve(strict=True)
+        if not args.urdf_dir.is_dir():
+            parser.error(f"--urdf-dir is not a directory: {args.urdf_dir}")
     args.output_dir = output_dir
     args.scene_tree = args.scene_tree.expanduser().resolve(strict=True)
+    if args.initial_states is not None:
+        args.initial_states = args.initial_states.expanduser().resolve(strict=True)
 
     kit_log_arg = f"--/log/file={output_dir / 'kit.log'}"
     args.kit_args = f"{args.kit_args} {kit_log_arg}".strip()
@@ -116,7 +138,23 @@ def _parse_args():
 
 
 ARGS = _parse_args()
-SCENE = load_replay_scene(ARGS.scene_tree, ARGS.scene_dir)
+SCENE = load_replay_scene(
+    ARGS.scene_tree,
+    ARGS.scene_dir,
+    urdf_dir_override=ARGS.urdf_dir,
+)
+if ARGS.initial_states is None:
+    INITIAL_STATES_REST = np.zeros((len(SCENE.objects), 13), dtype=np.float64)
+    INITIAL_STATES_REST[:, 3] = 1.0
+else:
+    _initial_states_by_name = load_scene_states(
+        ARGS.initial_states,
+        SCENE.names,
+        zero_velocities=not ARGS.preserve_initial_velocities,
+    )
+    INITIAL_STATES_REST = np.asarray(
+        [_initial_states_by_name[name] for name in SCENE.names], dtype=np.float64
+    )
 APP_LAUNCHER = AppLauncher(ARGS)
 SIMULATION_APP = APP_LAUNCHER.app
 
@@ -182,9 +220,7 @@ def _configure_logger() -> logging.Logger:
 
 def _spawn_objects(logger: logging.Logger) -> dict[str, RigidObject]:
     objects: dict[str, RigidObject] = {}
-    rest_identity_poses = np.zeros((len(SCENE.objects), 7), dtype=np.float64)
-    rest_identity_poses[:, 3] = 1.0
-    lab_poses = rest_poses_to_lab(rest_identity_poses)
+    lab_poses = rest_states_to_lab(INITIAL_STATES_REST)[:, :7]
 
     for index, (spec, pose) in enumerate(zip(SCENE.objects, lab_poses, strict=True)):
         converted_dir = ARGS.output_dir / "converted_assets" / f"object_{index:04d}"
@@ -232,12 +268,7 @@ def _collect_states(objects: dict[str, RigidObject]) -> torch.Tensor:
 
 
 def _initial_target_states_lab() -> np.ndarray:
-    rest_states = np.zeros((len(SCENE.objects), 13), dtype=np.float64)
-    rest_states[:, 3] = 1.0
-    lab_poses = rest_poses_to_lab(rest_states[:, :7])
-    states = np.zeros_like(rest_states)
-    states[:, :7] = lab_poses
-    return states
+    return rest_states_to_lab(INITIAL_STATES_REST)
 
 
 def _write_initial_states(objects: dict[str, RigidObject]) -> None:
@@ -488,8 +519,7 @@ def _run() -> dict:
         position_threshold_m=ARGS.position_stability_threshold,
         rotation_threshold_rad=ARGS.rotation_stability_threshold,
     )
-    target_rest = np.zeros((len(SCENE.objects), 13), dtype=np.float64)
-    target_rest[:, 3] = 1.0
+    target_rest = INITIAL_STATES_REST
     initial_position_error = np.linalg.norm(states_rest[0, :, :3] - target_rest[:, :3], axis=1)
     initial_quat_alignment = np.abs(
         np.sum(states_rest[0, :, 3:7] * target_rest[:, 3:7], axis=1)
@@ -734,12 +764,17 @@ def _run() -> dict:
         "scene": {
             "scene_tree": str(SCENE.scene_tree_path),
             "scene_dir": str(SCENE.scene_dir),
+            "urdf_dir": str(ARGS.urdf_dir) if ARGS.urdf_dir is not None else None,
             "object_names": list(SCENE.names),
             "fixed_names": list(SCENE.fixed_names),
             "movable_names": list(SCENE.movable_names),
             "object_count": len(SCENE.objects),
             "bounds_min_rest": list(SCENE.bounds_min_rest),
             "bounds_max_rest": list(SCENE.bounds_max_rest),
+            "initial_states": str(ARGS.initial_states)
+            if ARGS.initial_states is not None
+            else None,
+            "initial_velocities_preserved": ARGS.preserve_initial_velocities,
         },
         "simulation": {
             "device": str(sim.device),

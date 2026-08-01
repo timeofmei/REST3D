@@ -144,13 +144,23 @@ def load_replay_scene(
     scene_dir: str | Path,
     *,
     allow_extra_urdf: bool = False,
+    urdf_dir_override: str | Path | None = None,
 ) -> ReplaySceneSpec:
-    """Load and strictly validate matching OBJ/URDF assets without modifying them."""
+    """Load and strictly validate matching OBJ/URDF assets without modifying them.
+
+    ``urdf_dir_override`` lets a backend pair the original reconstruction meshes
+    with separately derived physics assets.  This keeps the Stage 2 directory
+    read-only and avoids assembling a second scene with fragile symlinks.
+    """
 
     scene_tree_path = Path(scene_tree_path).expanduser().resolve(strict=True)
     scene_dir = Path(scene_dir).expanduser().resolve(strict=True)
     obj_dir = scene_dir / "obj_files"
-    urdf_dir = scene_dir / "urdf_files"
+    urdf_dir = (
+        Path(urdf_dir_override).expanduser().resolve(strict=True)
+        if urdf_dir_override is not None
+        else scene_dir / "urdf_files"
+    )
     if not obj_dir.is_dir():
         raise FileNotFoundError(f"OBJ directory not found: {obj_dir}")
     if not urdf_dir.is_dir():

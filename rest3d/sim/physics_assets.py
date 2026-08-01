@@ -21,6 +21,10 @@ class PhysicsAssetPolicy:
     minimum_mass_kg: float = 0.02
     maximum_mass_kg: float = 100.0
     fallback_solid_fraction: float = 0.15
+    # Reconstructed surfaces often describe a thin watertight shell rather than
+    # the bulk material of the physical object.  Keep a conservative, generic
+    # lower bound so shell volume does not produce near-zero mass and inertia.
+    minimum_bounding_box_fill_fraction: float = 0.30
     minimum_extent_m: float = 1.0e-5
 
     def validate(self) -> None:
@@ -35,6 +39,8 @@ class PhysicsAssetPolicy:
             raise ValueError("maximum mass must be finite and at least the minimum mass")
         if not 0.0 < self.fallback_solid_fraction <= 1.0:
             raise ValueError("fallback solid fraction must be in (0, 1]")
+        if not 0.0 <= self.minimum_bounding_box_fill_fraction <= 1.0:
+            raise ValueError("minimum bounding-box fill fraction must be in [0, 1]")
         if not np.isfinite(self.minimum_extent_m) or self.minimum_extent_m <= 0.0:
             raise ValueError("minimum extent must be finite and positive")
 
@@ -51,6 +57,10 @@ class PhysicsAssetProperties:
     bounds_max_m: Tuple[float, float, float]
     extents_m: Tuple[float, float, float]
     bounding_box_volume_m3: float
+    raw_volume_m3: float
+    raw_bounding_box_fill_fraction: float
+    minimum_bounding_box_fill_fraction: float
+    volume_was_floored: bool
     signed_mesh_volume_m3: float
     effective_volume_m3: float
     volume_source: str
@@ -129,17 +139,27 @@ def analyze_physics_asset(
             signed_volume = float(mesh.volume)
         mass_properties = mesh.mass_properties
         reference_volume = float(mass_properties.volume)
-        effective_volume = reference_volume
+        raw_volume = reference_volume
         volume_source = "watertight_mesh"
     else:
         hull = mesh.convex_hull
         mass_properties = hull.mass_properties
         reference_volume = float(mass_properties.volume)
-        effective_volume = reference_volume * policy.fallback_solid_fraction
+        raw_volume = reference_volume * policy.fallback_solid_fraction
         volume_source = "convex_hull_fraction"
     if not np.isfinite(reference_volume) or reference_volume <= 0.0:
         raise ValueError("mesh has no positive mass-property volume: %s" % path)
 
+    bounding_box_volume = float(np.prod(extents))
+    minimum_volume = (
+        bounding_box_volume * policy.minimum_bounding_box_fill_fraction
+    )
+    effective_volume = max(raw_volume, minimum_volume)
+    volume_was_floored = effective_volume > raw_volume and not np.isclose(
+        effective_volume, raw_volume
+    )
+    if volume_was_floored:
+        volume_source += "_with_bbox_floor"
     unclamped_mass = effective_volume * policy.nominal_density_kg_m3
     mass = float(np.clip(unclamped_mass, policy.minimum_mass_kg, policy.maximum_mass_kg))
     mass_scale = mass / reference_volume
@@ -157,7 +177,11 @@ def analyze_physics_asset(
         bounds_min_m=tuple(float(value) for value in bounds[0]),
         bounds_max_m=tuple(float(value) for value in bounds[1]),
         extents_m=tuple(float(value) for value in extents),
-        bounding_box_volume_m3=float(np.prod(extents)),
+        bounding_box_volume_m3=bounding_box_volume,
+        raw_volume_m3=float(raw_volume),
+        raw_bounding_box_fill_fraction=float(raw_volume / bounding_box_volume),
+        minimum_bounding_box_fill_fraction=policy.minimum_bounding_box_fill_fraction,
+        volume_was_floored=volume_was_floored,
         signed_mesh_volume_m3=signed_volume,
         effective_volume_m3=float(effective_volume),
         volume_source=volume_source,

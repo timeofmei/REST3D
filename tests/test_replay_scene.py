@@ -122,6 +122,29 @@ class ReplaySceneTest(unittest.TestCase):
             self.assertEqual(scene.asset_prefix, "reconstruction_")
             self.assertEqual(scene.objects[0].obj_path.name, "reconstruction_item.obj")
 
+    def test_derived_urdf_directory_can_override_scene_assets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            tree_path, scene_dir = self._write_scene(root)
+            derived_dir = root / "derived_urdf"
+            derived_dir.mkdir()
+            for name in ("movable_asset", "fixed_asset"):
+                (derived_dir / f"{name}.urdf").write_text(
+                    f"<robot name='{name}-derived'><link name='base'/></robot>\n",
+                    encoding="utf-8",
+                )
+
+            scene = load_replay_scene(
+                tree_path,
+                scene_dir,
+                urdf_dir_override=derived_dir,
+            )
+
+            self.assertEqual(scene.names, ("fixed_asset", "movable_asset"))
+            self.assertTrue(
+                all(spec.urdf_path.parent == derived_dir for spec in scene.objects)
+            )
+
     def test_y_up_z_up_pose_and_state_round_trip(self):
         poses_rest = np.array(
             [[1.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0]], dtype=np.float64
