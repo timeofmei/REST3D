@@ -34,12 +34,17 @@
 
 Please follow [INSTALL.md](INSTALL.md) for detailed installation instructions.
 
-Then reactivate the environment:
+For the original Isaac Gym backend, reactivate the environment:
 
 ```bash
 conda deactivate
 conda activate gym
 ```
+
+The optional RTX 5090 GPU-tensor Stage 3 backend uses a separate `isaaclab`
+environment. See [the Isaac Lab installation guide](environments/install_isaaclab.md)
+and [the Stage 3 usage and regression guide](doc/isaac-lab-stage3.md). Do not
+replace or modify the existing `gym` environment.
 
 ## 🚀 Quick start
 Follow the steps below to reconstruct a physically stable 3D scene from a single image and interactively inspect object stability in physics simulator.
@@ -57,9 +62,16 @@ Outputs are saved to `output/<image_name>/stage2/scene_canon/`.
 
 **Step 2. Stabilize the scene**
 
+Choose either backend:
+
 ```bash
+# Original backend
 conda activate gym
-bash 2_stable_scene.sh
+bash 2_stable_scene.sh --backend isaac-gym
+
+# Isaac Lab backend (GPU PhysX + GPU tensor pipeline)
+conda activate isaaclab
+bash 2_stable_scene.sh --backend isaac-lab
 ```
 Outputs are saved to `output/<image_name>/stage3/`:
 - `global_scene/` — physically stable scene
@@ -67,11 +79,20 @@ Outputs are saved to `output/<image_name>/stage3/`:
 
 **🤗 Visualize and interact with the physically stable scene**
 
+Replay always requires a new output directory so existing Stage 3 results are
+never overwritten:
+
 ```bash
-conda activate gym
-bash 3_replay_in_simulator.sh
+conda activate isaaclab
+bash 3_replay_in_simulator.sh \
+  --backend isaac-lab \
+  --replay-output-dir output/isaaclab_migration/NEW_REPLAY_OUTPUT
 ```
-Follow the printed URL to open the scene in a browser and interactively inspect the physics simulation settling process.
+
+The Isaac Lab path is currently validated in headless physics mode. The original
+Isaac Gym/viser path remains available for interactive inspection. See the
+[Stage 3 guide](doc/isaac-lab-stage3.md) for complete commands, output fields,
+WSL limitations, final stability validation, and backend regression.
 
 
 ## Citation

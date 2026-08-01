@@ -1,6 +1,9 @@
 # Installation
 
-REST3D uses two conda environments: `rest3d` for scene reconstruction (Stages 1–2) and `gym` for scene stabilization using Isaac Gym (Stage 3).
+REST3D uses `rest3d` for scene reconstruction (Stages 1–2) and keeps `gym` for
+the original Isaac Gym Stage 3 backend. The optional Isaac Lab Stage 3 backend
+uses a third, independent `isaaclab` environment; do not upgrade either existing
+environment to install it.
 
 **1. Clone this repo**
 ```bash
@@ -13,7 +16,13 @@ export REST3D_ROOT="$(pwd)"
 
 **3. Set up the `gym` environment** — follow [environments/install_gym.md](environments/install_gym.md)
 
-**4. Set your API key** (for the `rest3d` environment):
+**4. Optional: set up the `isaaclab` environment** — follow
+[environments/install_isaaclab.md](environments/install_isaaclab.md). The tested
+RTX 5090/WSL headless baseline and its known upstream dependency conflict are
+recorded there. Runtime commands and regression gates are in
+[doc/isaac-lab-stage3.md](doc/isaac-lab-stage3.md).
+
+**5. Set your API key** (for the `rest3d` environment):
 ```bash
 # default Gemini backend
 export GEMINI_API_KEY=...

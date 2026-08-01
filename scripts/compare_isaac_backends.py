@@ -293,6 +293,8 @@ def main() -> int:
         "passed": all(common_checks.values()),
         "scope": "stage-f-matched-full-scene-replay",
         "checks": common_checks,
+        "object_names": list(names),
+        "fixed_names": list(comparison["fixed_names"]),
         "inputs": {
             "scene_tree": str(args.scene_tree),
             "scene_dir": str(args.scene_dir),

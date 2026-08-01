@@ -1,7 +1,7 @@
 # Isaac Lab environment for REST3D Stage 3
 
 This environment is independent from the existing `rest3d` and `gym` Conda
-environments. The tested Phase A baseline is:
+environments. The tested A–G baseline is:
 
 - Isaac Lab source tag `v2.3.2` (`37ddf626871758333d6ed89cf64ad702aef127d0`);
 - Isaac Sim `5.1.0.0`;
@@ -10,6 +10,11 @@ environments. The tested Phase A baseline is:
   `2.7.0+cu128`;
 - CUDA runtime `12.8` supplied by the PyTorch wheels;
 - RTX 5090 compute capability 12.0 (`sm_120`).
+
+The installed package metadata reports `isaaclab==0.54.2`; the authoritative
+Isaac Lab source identity for this editable install is the `v2.3.2` Git tag and
+commit above. Other observed transitive versions include NumPy `1.26.0`, trimesh
+`4.5.1`, and `warp-lang==1.15.0`.
 
 The version pair follows the official
 [Isaac Lab dependency table](https://github.com/isaac-sim/IsaacLab#isaac-sim-version-dependency)
@@ -82,6 +87,21 @@ device enumeration error. Headless CUDA PhysX and tensor operations work, but
 rendering is not validated and must remain disabled until the Vulkan path is
 fixed or tested on an officially supported host.
 
+After installation, verify the exact source checkout and package/runtime versions:
+
+```bash
+git -C /home/yangyankun/IsaacLab-2.3.2 rev-parse HEAD
+git -C /home/yangyankun/IsaacLab-2.3.2 describe --tags --always --dirty
+
+conda activate isaaclab
+python -c 'import torch; print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0))'
+python -c 'import importlib.metadata as m; print(m.version("isaacsim"), m.version("isaaclab"))'
+```
+
+The version commands are diagnostic only. A successful import is not the GPU
+acceptance test; run the smoke command below and require all checks in
+`smoke_results.json` to be true.
+
 ## NVRTC for runtime-generated PyTorch kernels
 
 Isaac Sim can load the CUDA 12.6 NVRTC library before PyTorch. Precompiled
@@ -99,3 +119,7 @@ python your_isaaclab_entry.py
 `scripts/run_isaaclab_replay.sh` applies this automatically. It does not
 persist either variable or modify the existing Conda environments. Override
 `ISAACLAB_NVRTC_LIBRARY` only when using another verified CUDA 12.8 location.
+
+For the complete Stage 3 CLI, final 60-frame validation, old Gym regression,
+output fields, and the full Stage G headless regression, continue with
+[the Stage 3 guide](../doc/isaac-lab-stage3.md).

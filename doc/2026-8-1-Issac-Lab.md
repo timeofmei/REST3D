@@ -1,10 +1,11 @@
 # REST3D Stage 3：Isaac Lab 迁移计划
 
 日期：2026-08-01
-状态：A–F 阶段已完成；Isaac Lab 正式 Stage 3 入口已串联 D 局部组和 E 全对象全局
+状态：A–G 阶段已完成；Isaac Lab 正式 Stage 3 入口已串联 D 局部组和 E 全对象全局
 CEM。实际六对象场景在 RTX 5090 上完成 16 环境、2 轮全局优化，并在独立 replay
 的第 60 帧通过 `6/6`、`0.1 m / 0.1 rad` 稳定门禁；F 已完成同输入的两后端设备、
-质量和性能对比，G 阶段尚未开始。
+质量和性能对比；G 已补齐用户文档、统一回归入口和任意对象名的完整 headless
+集成验证。
 
 ## 1. 目标与边界
 
@@ -1128,6 +1129,52 @@ F 收尾回归为 `48 passed`；相关 Python 在 `rest3d`、`gym` 和 `isaaclab
 - Isaac Gym 回归命令；
 - 实际场景结果和性能对比报告。
 
+#### G 阶段完成结果
+
+新增 [Isaac Lab Stage 3 使用与回归指南](./isaac-lab-stage3.md)，并从根
+`README.md`、`INSTALL.md` 和独立环境安装文档建立入口。指南包含已实测版本、两个
+backend 的 CLI、从新图片运行 D→E 的命令、最终 60 帧门禁、逐层 smoke/replay/CEM
+命令、输出与日志字段，以及 WSL/headless 只验证物理而未验证渲染的边界。
+
+新增 `scripts/run_stage3_regression.sh`。它先运行纯逻辑测试、三个 Python 环境的
+`py_compile` 和 shell `bash -n`，再生成带任意名称、没有对象级物理覆盖的三对象
+Stage 2 输入，实际依次运行：
+
+1. 4 个并行环境、1 轮局部 CEM；
+2. 4 个并行环境、1 轮全对象全局 CEM；
+3. 使用全局最优候选的 60 帧 Isaac Lab replay；
+4. Isaac Gym 与 Isaac Lab 的 60 帧同输入 replay 和统一 CUDA 能量比较；
+5. Stage 2 全文件前后 SHA-256、对象集合、自动质量/惯量、全对象候选/能量、GPU
+   tensor、论文稳定阈值和旧后端设备模式的统一工件校验。
+
+第一次完整运行保留在 `stage_g_generic_regression_v1`，它发现旧 Gym 在公共加载器
+已识别标准 Stage 2 前缀后，又按逻辑对象名重复拼接无前缀 URDF 路径。修复后旧 Gym
+直接使用公共 `ReplayObjectSpec` 的真实 OBJ/URDF 路径；不新增前缀或对象名规则，
+无前缀旧场景和带前缀 `scene_canon` 都走同一映射。v2 的全部物理门禁通过，但暴露
+比较 JSON 顶层遗漏对象名证据；补齐通用字段后 v3 完整通过。最终审计又把顶层
+`--require-stable` 透传到两个 backend，并让汇总器强制要求第 60 帧场景稳定；从零
+运行的正式严格门禁结果为 v4：
+
+```text
+output/isaaclab_migration/stage_g_generic_regression_v4/
+```
+
+正式 v4 的 `metrics.json` 为 `passed=true`，14/14 G 门禁通过；嵌套双后端比较为
+19/19。输入三个任意对象名全部保持，Stage 2 哈希不变，物理资产全部得到有限正质量
+与惯量。局部组数 1，全局采样实体数 2，每个候选包含 3/3 对象；全局 state/contact
+tensor 均为 `cuda:0`，全局仿真 `0.343 s`，整卡采样峰值 `4088 MiB`。最终第 60 帧
+在 `--require-stable` 下为 `3/3` 稳定；Gym 实测 GPU PhysX + CPU tensor，Lab 实测
+GPU PhysX + GPU tensor，公共全对象能量运行在 `cuda:0`。回归总计 `51 passed`。
+
+正式 v4 顶层提供 `command.txt`、`environment.json`、`run.log`、`metrics.json`、
+`states_initial.npy` 和 `states_final.npy`。v1/v2 失败目录均原样保留，没有删除或复用；
+当前场景六对象名未进入任何实现策略。
+
+公共路径修复后还对只读旧格式 `cam_22` `global_scene` 单独运行了 60 步 Gym 回归，
+新输出为 `stage_g_legacy_gym_cam22_unprefixed_v1`：6/6 资产加载，GPU PhysX 与预期
+CPU tensor pipeline 门禁通过。该回归只验证旧入口兼容，不把旧未优化场景的稳定性
+作为 G 的通过条件。
+
 ## 7. 分阶段门禁与验证矩阵
 
 | 阶段 | 最小验证 | 进入下一阶段的条件 |
@@ -1158,7 +1205,8 @@ output/isaaclab_migration/
   comparison_v1/
 ```
 
-这些只是计划中的显式示例；正式运行前逐一确认目录不存在。每次结果至少包含：
+这些只是计划中的显式示例；正式运行前逐一确认目录不存在。统一回归和比较报告至少
+包含：
 
 ```text
 command.txt

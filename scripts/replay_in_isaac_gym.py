@@ -171,7 +171,7 @@ def init_viser_server(center, radius, args):
     return server
 
 
-def load_viser_objects(server, obj_dir, name_to_idx, obj_delay=0.3):
+def load_viser_objects(server, obj_paths, name_to_idx, obj_delay=0.3):
     """Add world-frame OBJ meshes to viser at identity pose (vertices already in world frame)."""
     try:
         import trimesh
@@ -181,8 +181,8 @@ def load_viser_objects(server, obj_dir, name_to_idx, obj_delay=0.3):
 
     handles = {}
     for name in name_to_idx:
-        obj_path = os.path.join(obj_dir, f"{name}.obj")
-        if not os.path.isfile(obj_path):
+        obj_path = obj_paths.get(name)
+        if obj_path is None or not os.path.isfile(obj_path):
             _logger.warning(f"[viser] OBJ not found: {name}")
             continue
         try:
@@ -368,16 +368,11 @@ def replay(args):
                  f"  headless={args.headless}  save_video={args.save_video}")
 
     variant_dir = args.scene_dir
-    obj_dir_stage3  = os.path.join(variant_dir, "obj_files")
-    urdf_dir_stage3 = os.path.join(variant_dir, "urdf_files")
-    if not os.path.isdir(obj_dir_stage3):
-        raise FileNotFoundError(f"obj_files dir not found: {obj_dir_stage3}")
-    if not os.path.isdir(urdf_dir_stage3):
-        raise FileNotFoundError(f"urdf_files dir not found: {urdf_dir_stage3}")
-
     scene = load_replay_scene(scene_tree_path, variant_dir)
     all_names = list(scene.names)
-    _logger.info(f"[replay] {len(all_names)} objects from {obj_dir_stage3}")
+    object_specs = {spec.name: spec for spec in scene.objects}
+    obj_paths = {name: str(spec.obj_path) for name, spec in object_specs.items()}
+    _logger.info(f"[replay] {len(all_names)} objects from {scene.scene_dir / 'obj_files'}")
 
     fixed_set = set(scene.fixed_names)
     _logger.info(f"[replay] fixed={len(fixed_set & set(all_names))}  "
@@ -414,19 +409,12 @@ def replay(args):
     gpu_memory_samples = [_gpu_memory_used_mib()]
 
     # ---- load assets ------------------------------------------------
-    def _find_urdf(name):
-        p = os.path.join(urdf_dir_stage3, f"{name}.urdf")
-        if os.path.isfile(p):
-            return urdf_dir_stage3, f"{name}.urdf"
-        return None, None
-
     asset_started = time.perf_counter()
     assets = {}
     for name in all_names:
-        asset_dir, urdf_fname = _find_urdf(name)
-        if asset_dir is None:
-            _logger.warning(f"[replay] URDF missing — skipping {name}")
-            continue
+        urdf_path = object_specs[name].urdf_path
+        asset_dir = urdf_path.parent
+        urdf_fname = urdf_path.name
         is_fixed = name in fixed_set
         opt = gymapi.AssetOptions()
         opt.fix_base_link         = is_fixed
@@ -509,9 +497,7 @@ def replay(args):
 
     _world_mins, _world_maxs = [], []
     for name in all_names:
-        obj_path = os.path.join(obj_dir_stage3, f"{name}.obj")
-        if not os.path.isfile(obj_path):
-            continue
+        obj_path = obj_paths[name]
         try:
             mesh = load_trimesh_any(obj_path)
         except Exception:
@@ -825,7 +811,7 @@ def replay(args):
         viser_server = init_viser_server(center, radius, args)
         if viser_server is not None:
             handles = load_viser_objects(
-                viser_server, obj_dir_stage3, name_to_idx,
+                viser_server, obj_paths, name_to_idx,
                 obj_delay=args.viser_obj_delay)
             if handles:
                 if args.save_video:

@@ -14,6 +14,7 @@ OUTPUT_DIR=""
 REPLAY_OUTPUT_DIR=""
 BACKEND="isaac-gym"
 SETTLE_STEPS=120
+REQUIRE_STABLE=false
 
 usage() {
     cat <<'EOF'
@@ -26,6 +27,7 @@ Options:
                      Write replay results to this new directory (required)
   --backend NAME     isaac-gym (default) or isaac-lab
   --settle-steps N   Physics steps (default: 120)
+  --require-stable   Fail unless every object passes the 60-frame stability gate
   -h, --help         Show this help
 EOF
 }
@@ -56,6 +58,10 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || { echo "ERROR: --settle-steps requires a value" >&2; exit 2; }
             SETTLE_STEPS=$2
             shift 2
+            ;;
+        --require-stable)
+            REQUIRE_STABLE=true
+            shift
             ;;
         -h|--help)
             usage
@@ -97,6 +103,9 @@ SCENE_DIR="${RUN_DIR}/stage3/global_scene"
 
 if [[ "$BACKEND" == "isaac-lab" ]]; then
     ISAACLAB_REPLAY_ARGS=(--settle-steps "$SETTLE_STEPS")
+    if [[ "$REQUIRE_STABLE" == true ]]; then
+        ISAACLAB_REPLAY_ARGS+=(--require-stable)
+    fi
     if [[ -f "${RUN_DIR}/stage3/stage3_pipeline_results.json" ]]; then
         SCENE_DIR="${RUN_DIR}/stage2/scene_canon"
         PHYSICS_URDF_DIR="${RUN_DIR}/stage3/physics_assets/urdf_files"
@@ -130,6 +139,10 @@ ISAACGYM_DRIVER_LIB=""
 if [[ -d /usr/lib/wsl/lib ]]; then
     ISAACGYM_DRIVER_LIB="/usr/lib/wsl/lib"
 fi
+GYM_REPLAY_ARGS=(--settle_steps "$SETTLE_STEPS" --headless --no_save_video)
+if [[ "$REQUIRE_STABLE" == true ]]; then
+    GYM_REPLAY_ARGS+=(--require-stable)
+fi
 
 PYTHONPATH="$(pwd):${PYTHONPATH}" \
 CUDA_VISIBLE_DEVICES=0 \
@@ -140,4 +153,4 @@ python scripts/replay_in_simulator.py \
     --scene-tree "$SCENE_TREE" \
     --scene-dir "$SCENE_DIR" \
     --output-dir "$REPLAY_OUTPUT_DIR" \
-    --settle_steps "$SETTLE_STEPS" --headless --no_save_video
+    "${GYM_REPLAY_ARGS[@]}"
