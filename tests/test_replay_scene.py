@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from rest3d.sim.replay_scene import (
+    gym_states_xyzw_to_rest,
     lab_states_to_rest,
     load_replay_scene,
     rest_poses_to_lab,
@@ -161,6 +162,26 @@ class ReplaySceneTest(unittest.TestCase):
         np.testing.assert_allclose(states_rest[0, 7:10], [1.0, 2.0, 3.0], atol=1e-12)
         np.testing.assert_allclose(states_rest[0, 10:13], [-4.0, 5.0, 6.0], atol=1e-12)
         np.testing.assert_allclose(rest_states_to_lab(states_rest), states_lab, atol=1e-12)
+
+    def test_isaac_gym_xyzw_states_use_shared_wxyz_layout(self):
+        states_gym = np.zeros((2, 1, 13), dtype=np.float32)
+        states_gym[..., :3] = [1.0, 2.0, 3.0]
+        states_gym[..., 3:7] = [0.0, 0.0, np.sqrt(0.5), np.sqrt(0.5)]
+        states_gym[..., 7:13] = [4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+
+        states_rest = gym_states_xyzw_to_rest(states_gym)
+
+        np.testing.assert_allclose(
+            states_rest[..., 3:7],
+            np.broadcast_to(
+                [np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)], (2, 1, 4)
+            ),
+            atol=1.0e-7,
+        )
+        np.testing.assert_allclose(states_rest[..., :3], states_gym[..., :3])
+        np.testing.assert_allclose(states_rest[..., 7:13], states_gym[..., 7:13])
+        with self.assertRaisesRegex(ValueError, "final dimension 13"):
+            gym_states_xyzw_to_rest(np.zeros((1, 12)))
 
 
 if __name__ == "__main__":

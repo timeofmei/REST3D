@@ -239,6 +239,20 @@ def _normalize_quaternions(quaternions: np.ndarray) -> np.ndarray:
     return quaternions / norm
 
 
+def gym_states_xyzw_to_rest(states_xyzw: np.ndarray) -> np.ndarray:
+    """Convert Isaac Gym Y-up root states to the shared REST WXYZ layout."""
+
+    states = np.asarray(states_xyzw, dtype=np.float64)
+    if states.shape[-1] != 13:
+        raise ValueError(f"expected root states with final dimension 13, got {states.shape}")
+    if not np.isfinite(states).all():
+        raise ValueError("Isaac Gym root states contain non-finite values")
+    converted = states.copy()
+    converted[..., 3:7] = states[..., [6, 3, 4, 5]]
+    converted[..., 3:7] = _normalize_quaternions(converted[..., 3:7])
+    return converted
+
+
 def rest_poses_to_lab(poses_wxyz: np.ndarray) -> np.ndarray:
     """Map REST3D Y-up poses `[x,y,z,qw,qx,qy,qz]` to Isaac Lab Z-up."""
 

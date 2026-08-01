@@ -86,6 +86,11 @@ def _parse_args():
         default=1024,
         help="Maximum detailed PhysX contact records retained per object and frame",
     )
+    parser.add_argument(
+        "--state-only-benchmark",
+        action="store_true",
+        help="Collect root states only so backend throughput instrumentation matches Isaac Gym",
+    )
     parser.add_argument("--physics-dt", type=float, default=1.0 / 60.0)
     parser.add_argument(
         "--collision-approximation",
@@ -205,6 +210,36 @@ def _gpu_memory_used_mib() -> int | None:
         return int(completed.stdout.splitlines()[0].strip())
     except (FileNotFoundError, IndexError, subprocess.SubprocessError, ValueError):
         return None
+
+
+def _nvidia_environment() -> dict[str, str | int | None]:
+    result: dict[str, str | int | None] = {
+        "gpu": None,
+        "driver": None,
+        "memory_total_mib": None,
+    }
+    try:
+        completed = subprocess.run(
+            [
+                "nvidia-smi",
+                "--id=0",
+                "--query-gpu=name,driver_version,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        fields = [value.strip() for value in completed.stdout.splitlines()[0].split(",")]
+        result.update(
+            gpu=fields[0],
+            driver=fields[1],
+            memory_total_mib=int(fields[2]),
+        )
+    except (FileNotFoundError, IndexError, subprocess.SubprocessError, ValueError):
+        pass
+    return result
 
 
 def _configure_logger() -> logging.Logger:
@@ -467,17 +502,32 @@ def _run() -> dict:
         obj.update(0.0)
 
     collision_geometry = _inspect_collision_geometry(objects)
-    contact_views, contact_filters = _create_contact_views(objects, collision_geometry)
+    if ARGS.state_only_benchmark:
+        contact_views = {}
+        contact_filters = {name: [] for name in SCENE.names}
+    else:
+        contact_views, contact_filters = _create_contact_views(
+            objects, collision_geometry
+        )
 
     state_frames_lab = [_collect_states(objects)]
-    initial_contact = _collect_contact_snapshot(contact_views, dt)
-    contact_force_frames = [initial_contact[0]]
-    contact_count_frames = [initial_contact[1]]
-    contact_separation_frames = [initial_contact[2]]
-    contact_capacity_frames = [initial_contact[3]]
-    pair_contact_force_frames = [initial_contact[4]]
-    pair_contact_count_frames = [initial_contact[5]]
-    pair_contact_separation_frames = [initial_contact[6]]
+    if ARGS.state_only_benchmark:
+        contact_force_frames = []
+        contact_count_frames = []
+        contact_separation_frames = []
+        contact_capacity_frames = []
+        pair_contact_force_frames = []
+        pair_contact_count_frames = []
+        pair_contact_separation_frames = []
+    else:
+        initial_contact = _collect_contact_snapshot(contact_views, dt)
+        contact_force_frames = [initial_contact[0]]
+        contact_count_frames = [initial_contact[1]]
+        contact_separation_frames = [initial_contact[2]]
+        contact_capacity_frames = [initial_contact[3]]
+        pair_contact_force_frames = [initial_contact[4]]
+        pair_contact_count_frames = [initial_contact[5]]
+        pair_contact_separation_frames = [initial_contact[6]]
     gpu_memory_samples = [_gpu_memory_used_mib()]
     simulation_started = time.perf_counter()
     for step in range(ARGS.settle_steps):
@@ -487,14 +537,15 @@ def _run() -> dict:
         for obj in objects.values():
             obj.update(dt)
         state_frames_lab.append(_collect_states(objects))
-        contact_snapshot = _collect_contact_snapshot(contact_views, dt)
-        contact_force_frames.append(contact_snapshot[0])
-        contact_count_frames.append(contact_snapshot[1])
-        contact_separation_frames.append(contact_snapshot[2])
-        contact_capacity_frames.append(contact_snapshot[3])
-        pair_contact_force_frames.append(contact_snapshot[4])
-        pair_contact_count_frames.append(contact_snapshot[5])
-        pair_contact_separation_frames.append(contact_snapshot[6])
+        if not ARGS.state_only_benchmark:
+            contact_snapshot = _collect_contact_snapshot(contact_views, dt)
+            contact_force_frames.append(contact_snapshot[0])
+            contact_count_frames.append(contact_snapshot[1])
+            contact_separation_frames.append(contact_snapshot[2])
+            contact_capacity_frames.append(contact_snapshot[3])
+            pair_contact_force_frames.append(contact_snapshot[4])
+            pair_contact_count_frames.append(contact_snapshot[5])
+            pair_contact_separation_frames.append(contact_snapshot[6])
         if (step + 1) % 10 == 0:
             gpu_memory_samples.append(_gpu_memory_used_mib())
     torch.cuda.synchronize()
@@ -503,19 +554,35 @@ def _run() -> dict:
     nvrtc_version = _nvrtc_version()
 
     states_lab_tensor = torch.stack(state_frames_lab, dim=0)
-    contact_force_tensor = torch.stack(contact_force_frames, dim=0)
-    pair_contact_force_tensor = torch.stack(pair_contact_force_frames, dim=0)
     states_lab = states_lab_tensor.detach().cpu().numpy()
     states_rest = lab_states_to_rest(states_lab)
-    contact_force_norms = contact_force_tensor.detach().cpu().numpy()
-    contact_counts = np.stack(contact_count_frames, axis=0)
-    contact_minimum_separation = np.stack(contact_separation_frames, axis=0)
-    contact_capacity_saturated = np.stack(contact_capacity_frames, axis=0)
-    pair_contact_force_norms = pair_contact_force_tensor.detach().cpu().numpy()
-    pair_contact_counts = np.stack(pair_contact_count_frames, axis=0)
-    pair_contact_minimum_separation = np.stack(
-        pair_contact_separation_frames, axis=0
-    )
+    if ARGS.state_only_benchmark:
+        contact_force_tensor = None
+        pair_contact_force_tensor = None
+        contact_force_norms = np.zeros(states_lab.shape[:2], dtype=np.float32)
+        contact_counts = np.zeros(states_lab.shape[:2], dtype=np.int64)
+        contact_minimum_separation = np.full(
+            states_lab.shape[:2], np.nan, dtype=np.float64
+        )
+        contact_capacity_saturated = np.zeros(states_lab.shape[:2], dtype=bool)
+        pair_shape = (states_lab.shape[0], states_lab.shape[1], 0)
+        pair_contact_force_norms = np.zeros(pair_shape, dtype=np.float32)
+        pair_contact_counts = np.zeros(pair_shape, dtype=np.int64)
+        pair_contact_minimum_separation = np.full(
+            pair_shape, np.nan, dtype=np.float64
+        )
+    else:
+        contact_force_tensor = torch.stack(contact_force_frames, dim=0)
+        pair_contact_force_tensor = torch.stack(pair_contact_force_frames, dim=0)
+        contact_force_norms = contact_force_tensor.detach().cpu().numpy()
+        contact_counts = np.stack(contact_count_frames, axis=0)
+        contact_minimum_separation = np.stack(contact_separation_frames, axis=0)
+        contact_capacity_saturated = np.stack(contact_capacity_frames, axis=0)
+        pair_contact_force_norms = pair_contact_force_tensor.detach().cpu().numpy()
+        pair_contact_counts = np.stack(pair_contact_count_frames, axis=0)
+        pair_contact_minimum_separation = np.stack(
+            pair_contact_separation_frames, axis=0
+        )
     stability = evaluate_replay_stability(
         states_rest,
         evaluation_step=ARGS.stability_evaluation_steps,
@@ -542,6 +609,7 @@ def _run() -> dict:
         0.0,
     )
     valid_gpu_memory = [value for value in gpu_memory_samples if value is not None]
+    nvidia_environment = _nvidia_environment()
     checks = {
         "all_scene_objects_loaded": len(objects) == len(SCENE.objects),
         "expected_object_count_matches": ARGS.expected_object_count is None
@@ -556,7 +624,6 @@ def _run() -> dict:
         "physics_uses_gpu_pipeline": physics_context.use_gpu_pipeline,
         "physics_broadphase_is_gpu": physics_context.get_broadphase_type() == "GPU",
         "state_tensor_is_cuda": states_lab_tensor.device.type == "cuda",
-        "contact_tensor_is_cuda": contact_force_tensor.device.type == "cuda",
         "state_shape_is_complete": states_lab.shape
         == (ARGS.settle_steps + 1, len(SCENE.objects), 13),
         "initial_position_round_trip": float(initial_position_error.max()) < 1.0e-5,
@@ -564,13 +631,19 @@ def _run() -> dict:
         "states_are_finite": bool(np.isfinite(states_lab).all()),
         "torch_has_sm120": "sm_120" in torch.cuda.get_arch_list(),
         "nvrtc_supports_sm120": nvrtc_version >= (12, 8),
-        "all_objects_have_contact_views": tuple(contact_views) == SCENE.names,
-        "contact_data_capacity_not_saturated": not bool(
-            contact_capacity_saturated.any()
-        ),
         "all_objects_evaluated_for_stability": stability.stable.shape
         == (len(SCENE.objects),),
     }
+    if ARGS.state_only_benchmark:
+        checks["state_only_benchmark_collection"] = not contact_views
+    else:
+        checks.update(
+            contact_tensor_is_cuda=contact_force_tensor.device.type == "cuda",
+            all_objects_have_contact_views=tuple(contact_views) == SCENE.names,
+            contact_data_capacity_not_saturated=not bool(
+                contact_capacity_saturated.any()
+            ),
+        )
     if ARGS.require_stable:
         checks["scene_stable_at_evaluation_step"] = stability.scene_stable
 
@@ -583,6 +656,11 @@ def _run() -> dict:
         evaluation_step=np.asarray(stability.evaluation_step),
         position_threshold_m=np.asarray(stability.position_threshold_m),
         rotation_threshold_rad=np.asarray(stability.rotation_threshold_rad),
+        data_collection=np.asarray(
+            "root_states_each_step"
+            if ARGS.state_only_benchmark
+            else "root_states_and_detailed_contacts_each_step"
+        ),
         stable=stability.stable,
         displacement_at_evaluation_m=stability.displacement_at_evaluation_m,
         rotation_at_evaluation_rad=stability.rotation_at_evaluation_rad,
@@ -705,6 +783,7 @@ def _run() -> dict:
                 stability.terminal_mean_angular_speed_rad_s[index]
             ),
             "contact": {
+                "collected": not ARGS.state_only_benchmark,
                 "evaluation_count": int(
                     contact_counts[stability.evaluation_step, index]
                 ),
@@ -746,6 +825,7 @@ def _run() -> dict:
             for key, value in checks.items()
             if key != "scene_stable_at_evaluation_step"
         ),
+        "backend": "isaac-lab",
         "scene_stable": stability.scene_stable,
         "checks": checks,
         "versions": {
@@ -755,13 +835,15 @@ def _run() -> dict:
             "torch": torch.__version__,
             "cuda_runtime": torch.version.cuda,
             "nvrtc": ".".join(str(value) for value in nvrtc_version),
+            "driver": nvidia_environment["driver"],
         },
         "environment": {
             "platform": platform.platform(),
             "conda_prefix": os.environ.get("CONDA_PREFIX"),
             "ld_library_path": os.environ.get("LD_LIBRARY_PATH"),
-            "gpu": torch.cuda.get_device_name(0),
+            "gpu": nvidia_environment["gpu"] or torch.cuda.get_device_name(0),
             "compute_capability": list(torch.cuda.get_device_capability(0)),
+            "gpu_memory_total_mib": nvidia_environment["memory_total_mib"],
         },
         "scene": {
             "scene_tree": str(SCENE.scene_tree_path),
@@ -785,12 +867,21 @@ def _run() -> dict:
             "physics_broadphase_type": physics_context.get_broadphase_type(),
             "state_tensor_device": str(states_lab_tensor.device),
             "state_tensor_shape": list(states_lab.shape),
-            "contact_tensor_device": str(contact_force_tensor.device),
-            "contact_tensor_shape": list(contact_force_tensor.shape),
-            "pair_contact_tensor_device": str(pair_contact_force_tensor.device),
-            "pair_contact_tensor_shape": list(pair_contact_force_tensor.shape),
+            "contact_tensor_device": str(contact_force_tensor.device)
+            if contact_force_tensor is not None
+            else None,
+            "contact_tensor_shape": list(contact_force_tensor.shape)
+            if contact_force_tensor is not None
+            else None,
+            "pair_contact_tensor_device": str(pair_contact_force_tensor.device)
+            if pair_contact_force_tensor is not None
+            else None,
+            "pair_contact_tensor_shape": list(pair_contact_force_tensor.shape)
+            if pair_contact_force_tensor is not None
+            else None,
             "steps": ARGS.settle_steps,
             "dt_seconds": dt,
+            "startup_seconds": asset_started - total_started,
             "asset_load_seconds": asset_load_seconds,
             "simulation_seconds": simulation_seconds,
             "steps_per_second": ARGS.settle_steps / simulation_seconds,
@@ -798,6 +889,9 @@ def _run() -> dict:
             "torch_peak_memory_bytes": torch.cuda.max_memory_allocated(),
             "system_gpu_memory_used_mib_peak": max(valid_gpu_memory) if valid_gpu_memory else None,
             "collision_approximation": ARGS.collision_approximation,
+            "data_collection": "root_states_each_step"
+            if ARGS.state_only_benchmark
+            else "root_states_and_detailed_contacts_each_step",
         },
         "stability": {
             "evaluation_step": stability.evaluation_step,

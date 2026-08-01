@@ -1,9 +1,10 @@
 # REST3D Stage 3：Isaac Lab 迁移计划
 
 日期：2026-08-01
-状态：A–E 阶段已完成；Isaac Lab 正式 Stage 3 入口已串联 D 局部组和 E 全对象全局
+状态：A–F 阶段已完成；Isaac Lab 正式 Stage 3 入口已串联 D 局部组和 E 全对象全局
 CEM。实际六对象场景在 RTX 5090 上完成 16 环境、2 轮全局优化，并在独立 replay
-的第 60 帧通过 `6/6`、`0.1 m / 0.1 rad` 稳定门禁；F–G 阶段尚未开始。
+的第 60 帧通过 `6/6`、`0.1 m / 0.1 rad` 稳定门禁；F 已完成同输入的两后端设备、
+质量和性能对比，G 阶段尚未开始。
 
 ## 1. 目标与边界
 
@@ -1025,6 +1026,92 @@ E 收尾回归为 `44 passed`。新增/修改 Python 文件在 `rest3d` Python 3
 对比使用相同输入、physics dt、步数、collision 策略和随机种子。Isaac Gym 在 RTX
 5090 上预期仍是 GPU PhysX + CPU tensor pipeline；Isaac Lab 必须是 GPU PhysX +
 GPU tensor。数值不要求逐 bit 相同，但对象集合、阈值定义和能量项必须一致。
+
+#### F 阶段完成结果
+
+E 已提交为 `084fba6`（`Complete full-scene Isaac Lab global CEM`），随后开始 F。
+F 新增了统一 replay 比较链路，而没有把两个 runtime 导入同一 Python 进程：
+
+- Isaac Gym 继续在原 `gym` Python 3.8 环境运行，明确使用 GPU PhysX、CPU tensor
+  pipeline；现在保存完整 `[frames, objects, 13]` 状态，并通过公共 WXYZ 转换和稳定性
+  评估输出逐对象结果；
+- Isaac Lab 继续在独立 Python 3.11 环境运行，使用 GPU PhysX、GPU broadphase 和
+  CUDA state tensor；常规 replay 仍保留完整 contact 诊断，F 的
+  `--state-only-benchmark` 只在公平计时时关闭逐 pair 接触采集；
+- 两后端计时都只做每帧 root-state 读取，不渲染，不把 Lab 的额外 contact 采集开销
+  混入纯 state pipeline 对比；
+- Isaac Gym 的 V-HACD hull 上限改成统一的几何参数，不再按对象名称关键字选择；
+- 后处理在 `isaaclab` 环境的 RTX 5090 上，把两套完整轨迹都转为 CUDA `float64`，
+  使用同一个全局对象计划、同一套稳定/布局/速度/GJK 穿插能量和同一逐对象归因。
+
+没有直接比较旧 Gym 与新 Lab 的 CEM reward。E 的审计已经证明旧 Gym 全局 CEM
+没有让组内子对象进入候选仿真，直接比较两个优化器的 reward 会违反“对象集合和
+能量项一致”这一 F 前提。F 因此选择两后端都支持的完整六对象 replay 作为匹配物理
+workload，再对两套轨迹统一计算四类全对象能量；结果中的 CEM population/iterations
+明确记录为 `null`，避免制造不可比的优化器数字。
+
+先用两对象合成场景完成 60 步集成 smoke，随后对只读实际输入运行正式比较：
+
+```text
+output/isaaclab_migration/backend_comparison_cam22_phase_f_state_only_formal_v2/
+```
+
+正式 workload 为同一 `scene_tree.json` 和同一旧格式 `stage3/global_scene`，6 个对象、
+0 个 fixed 对象、1 个环境、120 步、`dt=1/60 s`、第 15 帧速度项、第 60 帧稳定性与
+settled 项、`convex_decomposition`、`0.1 m / 0.1 rad`。replay 是确定性任务，seed
+`211` 被记录但不参与采样。19 个输入、设备、状态格式、对象集合、阈值和公共能量
+门禁全部通过；两个初始状态最大位置差 `6.32e-7 m`、旋转差 `0 rad`。
+
+| 指标 | Isaac Gym Preview 4 | Isaac Sim 5.1 + Isaac Lab 2.3.2 |
+| --- | ---: | ---: |
+| Python / PyTorch / CUDA runtime | `3.8.20 / 2.2.2+cu121 / 12.1` | `3.11.15 / 2.7.0+cu128 / 12.8` |
+| PhysX / tensor pipeline | `GPU / CPU` | `GPU / GPU` |
+| state tensor | `cpu` | `cuda:0` |
+| runtime 内启动准备 | `3.165 s` | `0.909 s` |
+| 资产加载 | `18.869 s` | `2.889 s` |
+| 120 步仿真 | `0.893 s` | `1.151 s` |
+| 吞吐 | `134.31 steps/s` | `104.26 steps/s` |
+| 总时长 | `24.461 s` | `6.240 s` |
+| 整卡显存采样峰值 | `3379 MiB` | `4067 MiB` |
+| 第 60 帧稳定对象 | `1 / 6` | `5 / 6` |
+| 最大位移 / 旋转 | `1.0572 m / 1.3385 rad` | `0.1405 m / 0.4375 rad` |
+| 公共全对象能量 | `40.7898` | `7.0256` |
+| placement / settled / final GJK 相交对 | `5 / 1 / 1` | `4 / 3 / 3` |
+
+这组单环境数据不能解释成“GPU tensor pipeline 必然提升单环境 steps/s”。本次 Lab
+纯步进比 Gym 慢 `28.8%`，吞吐为 Gym 的 `77.6%`；GPU pipeline 的直接收益是状态
+无需回到 CPU，能够承载 D/E 的批量环境和 CUDA 能量计算。另一方面，本次观测到的
+Lab 总时长约为 Gym 的 `25.5%`，主要来自资产加载差异。资产缓存、cooking 实现和
+单次运行波动会影响这个数字，因此它是本机该命令的一次实测，不是跨机器的普遍
+性能结论。
+
+质量结果也不能归因于 tensor 所在设备本身。两个 PhysX 版本、collision cooking、
+质量/惯量解释存在差异；同一几何在贴合边界还有 `6.32e-7 m` 初始差，因此 placement
+GJK 计数相差一个。可下结论的是：旧 Gym 后端仍可执行完整六对象 GPU PhysX；新 Lab
+链路确实使用 CUDA tensor，并在这次匹配输入上产生更小的位姿运动和更低的公共全
+对象能量。正式 E 最优候选的独立 `6/6` 稳定结果仍以 E 的最终 replay 为准，不能用
+本节旧 `global_scene` 的 `5/6` 替代。
+
+可复现命令如下，`NEW_COMPARISON_OUTPUT` 必须不存在：
+
+```bash
+bash scripts/run_stage3_backend_comparison.sh \
+  output/cam_22_foreground_run1/stage2/scene_tree.json \
+  output/cam_22_foreground_run1/stage3/global_scene \
+  output/isaaclab_migration/NEW_COMPARISON_OUTPUT \
+  --steps 120 --early-step 15 --evaluation-step 60 \
+  --position-threshold 0.1 --rotation-threshold 0.1 \
+  --seed 211 --vhacd-max-hulls 16
+```
+
+比较目录包含两个后端各自的完整日志、JSON 和轨迹，以及统一的
+`comparison/{command.txt,environment.json,run.log,metrics.json,states_initial.npy,
+states_final.npy}`。wrapper 在启动任何 runtime 前拒绝已存在的输出路径，并只在子
+进程环境中设置 Gym 的 `libpython3.8` preload 或 Lab 的 NVRTC/WSL driver path。
+F 收尾回归为 `48 passed`；相关 Python 在 `rest3d`、`gym` 和 `isaaclab` 环境通过
+`py_compile`，wrapper 通过 `bash -n`。合成 state-only 比较、六对象正式比较和 Lab
+默认完整 contact 模式均实际运行通过，正式导出工件还用独立 CUDA 运算重新加载
+核验。实现扫描不含当前六对象名称，比较 wrapper 的既有输出拒绝门禁也已实测通过。
 
 ### G. 文档与回归测试
 

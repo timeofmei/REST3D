@@ -7,6 +7,8 @@ import argparse
 import json
 import logging
 import os
+import platform
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -18,7 +20,8 @@ from rest3d.models.cem_opt import (
     create_sim_and_viewer,
     torch_cuda_pipeline_supported,
 )
-from rest3d.sim.replay_scene import load_replay_scene
+from rest3d.sim.replay_scene import gym_states_xyzw_to_rest, load_replay_scene
+from rest3d.sim.stability import evaluate_replay_stability
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,7 +40,7 @@ def config_args():
                     help="Read-only Stage 3 scene containing obj_files and urdf_files")
     ap.add_argument("--output-dir", "--output_dir", dest="output_dir", required=True,
                     help="New replay result directory; fails if it already exists")
-    ap.add_argument("--settle_steps", type=int, default=120,
+    ap.add_argument("--settle-steps", "--settle_steps", dest="settle_steps", type=int, default=120,
                     help="Physics settle steps")
     ap.add_argument("--headless", action="store_true",
                     help="Run without interactive viewer")
@@ -54,8 +57,17 @@ def config_args():
     ap.add_argument("--max_depenetration_velocity", type=float, default=1.0)
     ap.add_argument("--no_vhacd", action="store_true",
                     help="Disable V-HACD decomposition (faster load, rougher collision)")
+    ap.add_argument("--vhacd-max-hulls", type=int, default=16,
+                    help="Generic V-HACD hull limit applied to every object")
     ap.add_argument("--linear_damping",  type=float, default=0.3)
     ap.add_argument("--angular_damping", type=float, default=0.3)
+    ap.add_argument("--expected-object-count", type=int)
+    ap.add_argument("--stability-evaluation-steps", type=int, default=60)
+    ap.add_argument("--position-stability-threshold", type=float, default=0.1)
+    ap.add_argument("--rotation-stability-threshold", type=float, default=0.1)
+    ap.add_argument("--early-window-steps", type=int, default=10)
+    ap.add_argument("--terminal-window-steps", type=int, default=10)
+    ap.add_argument("--require-stable", action="store_true")
     ap.add_argument("--fps",           type=int, default=30,   help="Video FPS (default: 30)")
     ap.add_argument("--cam_width",     type=int, default=1920, help="Isaac Gym camera width")
     ap.add_argument("--cam_height",    type=int, default=1080, help="Isaac Gym camera height")
@@ -83,6 +95,18 @@ def config_args():
     args = ap.parse_args()
     args.scene_tree = str(Path(args.scene_tree).expanduser().resolve(strict=True))
     args.scene_dir = str(Path(args.scene_dir).expanduser().resolve(strict=True))
+    if args.settle_steps < 1:
+        ap.error("--settle-steps must be positive")
+    if not 1 <= args.stability_evaluation_steps <= args.settle_steps:
+        ap.error("stability evaluation must be within the simulated frame range")
+    if args.position_stability_threshold <= 0.0 or args.rotation_stability_threshold <= 0.0:
+        ap.error("stability thresholds must be positive")
+    if args.early_window_steps < 1 or args.terminal_window_steps < 1:
+        ap.error("velocity windows must be positive")
+    if args.vhacd_max_hulls < 1:
+        ap.error("--vhacd-max-hulls must be positive")
+    if args.expected_object_count is not None and args.expected_object_count < 1:
+        ap.error("--expected-object-count must be positive")
     output_dir = Path(args.output_dir).expanduser().resolve()
     scene_dir = Path(args.scene_dir)
     if output_dir == scene_dir or scene_dir in output_dir.parents:
@@ -293,7 +317,51 @@ def _viser_replay(server, handles, name_to_idx, all_states, default_fps):
         pass
 
 
+def _gpu_memory_used_mib():
+    try:
+        completed = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.used",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return int(completed.stdout.strip().splitlines()[0])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+
+
+def _nvidia_environment():
+    result = {"gpu": None, "driver": None, "memory_total_mib": None}
+    try:
+        completed = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,driver_version,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        fields = [value.strip() for value in completed.stdout.splitlines()[0].split(",")]
+        result.update(
+            gpu=fields[0],
+            driver=fields[1],
+            memory_total_mib=int(fields[2]),
+        )
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        pass
+    return result
+
+
 def replay(args):
+    total_started = time.perf_counter()
     scene_tree_path = args.scene_tree
 
     _logger.info(f"[replay] scene_dir={args.scene_dir}  output_dir={args.output_dir}  settle_steps={args.settle_steps}"
@@ -343,6 +411,7 @@ def replay(args):
         use_gpu_pipeline=use_gpu_pipeline,
         use_gpu_physics=use_gpu_physics,
     )
+    gpu_memory_samples = [_gpu_memory_used_mib()]
 
     # ---- load assets ------------------------------------------------
     def _find_urdf(name):
@@ -351,6 +420,7 @@ def replay(args):
             return urdf_dir_stage3, f"{name}.urdf"
         return None, None
 
+    asset_started = time.perf_counter()
     assets = {}
     for name in all_names:
         asset_dir, urdf_fname = _find_urdf(name)
@@ -368,18 +438,18 @@ def replay(args):
         opt.angular_damping       = args.angular_damping
         opt.vhacd_enabled         = not args.no_vhacd
         if opt.vhacd_enabled:
-            n_lower = name.lower()
-            if any(k in n_lower for k in ("plant", "vase", "flower", "tree", "curtain", "leaf")):
-                opt.vhacd_params.max_convex_hulls = 32
-            elif any(k in n_lower for k in ("box", "tray", "cabinet", "shelf", "table", "desk",
-                                             "chair", "sofa", "bed", "wall", "floor", "ceiling")):
-                opt.vhacd_params.max_convex_hulls = 8
-            else:
-                opt.vhacd_params.max_convex_hulls = 16
+            opt.vhacd_params.max_convex_hulls = args.vhacd_max_hulls
             opt.vhacd_params.resolution = 100_000
         asset = ig.load_asset(sim, str(asset_dir), urdf_fname, opt)
         assets[name] = (asset, is_fixed)
         _logger.info(f"  loaded {name}  fixed={is_fixed}  ({asset_dir})")
+    if tuple(assets) != tuple(all_names):
+        raise RuntimeError("loaded asset set/order differs from the validated scene")
+    if args.expected_object_count is not None and len(assets) != args.expected_object_count:
+        raise RuntimeError(
+            "validated scene contains %d objects; expected %d"
+            % (len(assets), args.expected_object_count)
+        )
 
     # ---- create single env + actors ---------------------------------
     env_handle = ig.create_env(
@@ -396,6 +466,8 @@ def replay(args):
         actor_handles[name] = ig.create_actor(env_handle, asset, pose, name, 0, 0)
 
     ig.prepare_sim(sim)
+    asset_load_seconds = time.perf_counter() - asset_started
+    gpu_memory_samples.append(_gpu_memory_used_mib())
 
     _rt = ig.acquire_actor_root_state_tensor(sim)
     root_states = gymtorch.wrap_tensor(_rt)   # (n_sim_actors, 13) on GPU or CPU
@@ -405,8 +477,13 @@ def replay(args):
         name: ig.get_actor_index(env_handle, ah, gymapi.DOMAIN_SIM)
         for name, ah in actor_handles.items()
     }
+    if set(name_to_idx) != set(all_names):
+        raise RuntimeError("created actor set differs from the validated scene")
 
     _device = root_states.device
+    ordered_indices = torch.tensor(
+        [name_to_idx[name] for name in all_names], dtype=torch.long, device=_device
+    )
 
     def push_poses():
         # OBJs are world-frame: actor origin at identity, mesh vertices define world positions
@@ -424,7 +501,8 @@ def replay(args):
 
     push_poses()
     ig.refresh_actor_root_state_tensor(sim)
-    initial_states = root_states.detach().cpu().numpy().copy()
+    initial_states = root_states[ordered_indices].detach().cpu().numpy().copy()
+    state_frames_xyzw = [initial_states]
 
     # ---- camera framing: AABB from stage3 world-frame OBJs (no transform needed) ----
     from rest3d.utils.mesh import load_trimesh_any
@@ -479,11 +557,17 @@ def replay(args):
     all_states = []   # list of (n_actors, 7) float32 numpy arrays for viser replay
     _logger.info(f"[replay] Settling {args.settle_steps} steps ...")
     simulation_started = time.perf_counter()
+    completed_steps = 0
     for step in range(args.settle_steps):
         ig.simulate(sim)
         ig.fetch_results(sim, True)
         ig.refresh_actor_root_state_tensor(sim)
-        ig.step_graphics(sim)
+        if viewer is not None or cam_handle is not None:
+            ig.step_graphics(sim)
+        state_frames_xyzw.append(
+            root_states[ordered_indices].detach().cpu().numpy().copy()
+        )
+        completed_steps = step + 1
         if cam_handle is not None:
             ig.render_all_camera_sensors(sim)
             rgba = ig.get_camera_image(sim, env_handle, cam_handle, gymapi.IMAGE_COLOR)
@@ -492,14 +576,17 @@ def replay(args):
             frames.append(rgb.copy())
         if args.viser:
             all_states.append(root_states[:, :7].cpu().numpy().copy())
+        if (step + 1) % 30 == 0:
+            gpu_memory_samples.append(_gpu_memory_used_mib())
         if viewer is not None:
             ig.draw_viewer(viewer, sim, True)
             if ig.query_viewer_has_closed(viewer):
                 _logger.info("[replay] Viewer closed early.")
                 break
     simulation_seconds = time.perf_counter() - simulation_started
+    gpu_memory_samples.append(_gpu_memory_used_mib())
     ig.refresh_actor_root_state_tensor(sim)
-    final_states = root_states.detach().cpu().numpy().copy()
+    final_states = root_states[ordered_indices].detach().cpu().numpy().copy()
 
     # ---- save Isaac Gym MP4 (non-viser mode) -------------------------
     if args.save_video and frames:
@@ -528,23 +615,195 @@ def replay(args):
             ig.draw_viewer(viewer, sim, True)
         ig.destroy_viewer(viewer)
 
-    np.save(os.path.join(args.output_dir, "replay_states_initial.npy"), initial_states)
-    np.save(os.path.join(args.output_dir, "replay_states_final.npy"), final_states)
+    states_xyzw = np.stack(state_frames_xyzw, axis=0)
+    states_rest = gym_states_xyzw_to_rest(states_xyzw)
+    stability = evaluate_replay_stability(
+        states_rest,
+        evaluation_step=args.stability_evaluation_steps,
+        position_threshold_m=args.position_stability_threshold,
+        rotation_threshold_rad=args.rotation_stability_threshold,
+        early_window_steps=args.early_window_steps,
+        terminal_window_steps=args.terminal_window_steps,
+    )
+    valid_gpu_memory = [value for value in gpu_memory_samples if value is not None]
+    nvidia_environment = _nvidia_environment()
+    compute_capability = (
+        list(torch.cuda.get_device_capability(0)) if torch.cuda.is_available() else None
+    )
+    collision_geometry = {
+        name: {
+            "body_count": int(ig.get_asset_rigid_body_count(assets[name][0])),
+            "shape_count": int(ig.get_asset_rigid_shape_count(assets[name][0])),
+        }
+        for name in all_names
+    }
+    checks = {
+        "all_scene_objects_loaded": tuple(assets) == tuple(all_names),
+        "expected_object_count_matches": args.expected_object_count is None
+        or len(all_names) == args.expected_object_count,
+        "all_objects_have_rigid_bodies": all(
+            values["body_count"] > 0 for values in collision_geometry.values()
+        ),
+        "all_objects_have_collision_shapes": all(
+            values["shape_count"] > 0 for values in collision_geometry.values()
+        ),
+        "physics_uses_gpu_sim": use_gpu_physics,
+        "physics_uses_expected_cpu_tensor_pipeline": not use_gpu_pipeline
+        and root_states.device.type == "cpu",
+        "state_shape_is_complete": states_rest.shape
+        == (args.settle_steps + 1, len(all_names), 13),
+        "all_objects_evaluated_for_stability": stability.stable.shape
+        == (len(all_names),),
+        "states_are_finite": bool(np.isfinite(states_rest).all()),
+    }
+    if args.require_stable:
+        checks["scene_stable_at_evaluation_step"] = stability.scene_stable
+
+    np.save(os.path.join(args.output_dir, "replay_states_initial.npy"), states_rest[0])
+    np.save(os.path.join(args.output_dir, "replay_states_final.npy"), states_rest[-1])
+    np.save(os.path.join(args.output_dir, "replay_states_rest.npy"), states_rest)
+    np.save(os.path.join(args.output_dir, "replay_states_gym_xyzw.npy"), states_xyzw)
+    np.savez_compressed(
+        os.path.join(args.output_dir, "stability_metrics.npz"),
+        object_names=np.asarray(all_names),
+        fixed=np.asarray([name in fixed_set for name in all_names]),
+        evaluation_step=np.asarray(stability.evaluation_step),
+        position_threshold_m=np.asarray(stability.position_threshold_m),
+        rotation_threshold_rad=np.asarray(stability.rotation_threshold_rad),
+        stable=stability.stable,
+        displacement_at_evaluation_m=stability.displacement_at_evaluation_m,
+        rotation_at_evaluation_rad=stability.rotation_at_evaluation_rad,
+        final_displacement_m=stability.final_displacement_m,
+        final_rotation_rad=stability.final_rotation_rad,
+        maximum_excursion_m=stability.maximum_excursion_m,
+        maximum_rotation_excursion_rad=stability.maximum_rotation_excursion_rad,
+        early_max_linear_speed_m_s=stability.early_max_linear_speed_m_s,
+        early_max_angular_speed_rad_s=stability.early_max_angular_speed_rad_s,
+        terminal_max_linear_speed_m_s=stability.terminal_max_linear_speed_m_s,
+        terminal_max_angular_speed_rad_s=stability.terminal_max_angular_speed_rad_s,
+        terminal_mean_linear_speed_m_s=stability.terminal_mean_linear_speed_m_s,
+        terminal_mean_angular_speed_rad_s=stability.terminal_mean_angular_speed_rad_s,
+    )
+
+    object_results = {}
+    for index, name in enumerate(all_names):
+        unstable_reasons = []
+        if stability.displacement_at_evaluation_m[index] > stability.position_threshold_m:
+            unstable_reasons.append("translation")
+        if stability.rotation_at_evaluation_rad[index] > stability.rotation_threshold_rad:
+            unstable_reasons.append("rotation")
+        object_results[name] = {
+            "fixed": name in fixed_set,
+            "collision": collision_geometry[name],
+            "initial_state_rest": states_rest[0, index].tolist(),
+            "evaluation_state_rest": states_rest[stability.evaluation_step, index].tolist(),
+            "final_state_rest": states_rest[-1, index].tolist(),
+            "stable": bool(stability.stable[index]),
+            "unstable_reasons": unstable_reasons,
+            "displacement_at_evaluation_m": float(
+                stability.displacement_at_evaluation_m[index]
+            ),
+            "rotation_at_evaluation_rad": float(
+                stability.rotation_at_evaluation_rad[index]
+            ),
+            "final_displacement_m": float(stability.final_displacement_m[index]),
+            "final_rotation_rad": float(stability.final_rotation_rad[index]),
+            "maximum_excursion_m": float(stability.maximum_excursion_m[index]),
+            "maximum_rotation_excursion_rad": float(
+                stability.maximum_rotation_excursion_rad[index]
+            ),
+            "early_max_linear_speed_m_s": float(
+                stability.early_max_linear_speed_m_s[index]
+            ),
+            "early_max_angular_speed_rad_s": float(
+                stability.early_max_angular_speed_rad_s[index]
+            ),
+            "terminal_max_linear_speed_m_s": float(
+                stability.terminal_max_linear_speed_m_s[index]
+            ),
+            "terminal_max_angular_speed_rad_s": float(
+                stability.terminal_max_angular_speed_rad_s[index]
+            ),
+            "terminal_mean_linear_speed_m_s": float(
+                stability.terminal_mean_linear_speed_m_s[index]
+            ),
+            "terminal_mean_angular_speed_rad_s": float(
+                stability.terminal_mean_angular_speed_rad_s[index]
+            ),
+        }
+
     replay_result = {
-        "passed": True,
+        "passed": all(checks.values()),
+        "runtime_passed": all(
+            value
+            for key, value in checks.items()
+            if key != "scene_stable_at_evaluation_step"
+        ),
         "backend": "isaac-gym",
-        "object_names": all_names,
-        "fixed_names": sorted(fixed_set & set(all_names)),
-        "object_count": len(all_names),
-        "physics_device": "cuda:0" if use_gpu_physics else "cpu",
-        "gpu_physx": use_gpu_physics,
-        "gpu_tensor_pipeline": use_gpu_pipeline,
-        "state_tensor_device": str(root_states.device),
-        "state_shape": list(root_states.shape),
-        "steps": args.settle_steps,
-        "simulation_seconds": simulation_seconds,
-        "steps_per_second": args.settle_steps / simulation_seconds,
-        "state_format": "position_xyz, quaternion_xyzw, linear_velocity_xyz, angular_velocity_xyz",
+        "scene_stable": stability.scene_stable,
+        "checks": checks,
+        "versions": {
+            "python": platform.python_version(),
+            "isaac_gym": "Preview 4",
+            "torch": torch.__version__,
+            "cuda_runtime": torch.version.cuda,
+            "driver": nvidia_environment["driver"],
+        },
+        "environment": {
+            "platform": platform.platform(),
+            "conda_prefix": os.environ.get("CONDA_PREFIX"),
+            "gpu": nvidia_environment["gpu"],
+            "compute_capability": compute_capability,
+            "gpu_memory_total_mib": nvidia_environment["memory_total_mib"],
+        },
+        "scene": {
+            "scene_tree": scene_tree_path,
+            "scene_dir": variant_dir,
+            "object_names": all_names,
+            "fixed_names": sorted(fixed_set & set(all_names)),
+            "movable_names": sorted(set(all_names) - fixed_set),
+            "object_count": len(all_names),
+        },
+        "simulation": {
+            "device": "cuda:0" if use_gpu_physics else "cpu",
+            "physics_uses_gpu_sim": use_gpu_physics,
+            "physics_uses_gpu_pipeline": use_gpu_pipeline,
+            "physics_broadphase_type": "GPU" if use_gpu_physics else "CPU",
+            "state_tensor_device": str(root_states.device),
+            "state_tensor_shape": list(root_states.shape),
+            "recorded_state_shape": list(states_rest.shape),
+            "steps": completed_steps,
+            "dt_seconds": 1.0 / 60.0,
+            "startup_seconds": asset_started - total_started,
+            "asset_load_seconds": asset_load_seconds,
+            "simulation_seconds": simulation_seconds,
+            "steps_per_second": completed_steps / simulation_seconds,
+            "total_seconds": time.perf_counter() - total_started,
+            "system_gpu_memory_used_mib_peak": max(valid_gpu_memory)
+            if valid_gpu_memory
+            else None,
+            "collision_approximation": "convex_hull"
+            if args.no_vhacd
+            else "convex_decomposition",
+            "vhacd_max_convex_hulls": None
+            if args.no_vhacd
+            else args.vhacd_max_hulls,
+            "data_collection": "root_states_each_step",
+        },
+        "stability": {
+            "evaluation_step": stability.evaluation_step,
+            "evaluation_time_seconds": stability.evaluation_step / 60.0,
+            "position_threshold_m": stability.position_threshold_m,
+            "rotation_threshold_rad": stability.rotation_threshold_rad,
+            "require_stable": args.require_stable,
+            "scene_stable": stability.scene_stable,
+            "stable_object_count": int(np.count_nonzero(stability.stable)),
+            "unstable_object_names": [
+                name for index, name in enumerate(all_names) if not stability.stable[index]
+            ],
+            "metrics_file": os.path.join(args.output_dir, "stability_metrics.npz"),
+        },
+        "objects": object_results,
     }
     with open(os.path.join(args.output_dir, "replay_results.json"), "x") as file:
         json.dump(replay_result, file, indent=2)
@@ -552,6 +811,8 @@ def replay(args):
 
     ig.destroy_sim(sim)
     _logger.info("[replay] Physics done. Results: %s", os.path.join(args.output_dir, "replay_results.json"))
+    if not replay_result["passed"]:
+        raise RuntimeError("Isaac Gym replay checks failed: %s" % checks)
 
     # Save states for future interactive replay without re-running physics
     if all_states:
