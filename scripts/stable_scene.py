@@ -967,6 +967,8 @@ def config_args():
     ap.add_argument("--cem-episodes", type=int, default=None)
     ap.add_argument("--cem-iters-subtree", type=int, default=None)
     ap.add_argument("--cem-iters-joint", type=int, default=None)
+    ap.add_argument("--cem-seed", type=int, default=None,
+                    help="Fix the backend-neutral CEM random seed")
     ap.add_argument("--total-settle-steps", type=int, default=None)
     ap.add_argument("--vel-settle-steps", type=int, default=None)
     ap.add_argument("--no-vhacd", action="store_true",
@@ -985,6 +987,7 @@ def config_args():
         ("cem_episodes", "cem_episodes"),
         ("cem_iters_subtree", "cem_iters_subtree"),
         ("cem_iters_joint", "cem_iters_joint"),
+        ("cem_seed", "cem_seed"),
         ("total_settle_steps", "total_settle_steps"),
         ("vel_settle_steps", "vel_settle_steps"),
     ):

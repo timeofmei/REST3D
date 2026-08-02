@@ -20,7 +20,12 @@ def gjk_support(Va, Vb, d):
     return Va[ar, ia] - Vb[ar, ib]
 
 
-def gjk_batch(Va, Vb, max_iter: int = 32):
+def gjk_batch(
+    Va,
+    Vb,
+    max_iter: int = 32,
+    nonconverged_is_collision: bool = True,
+):
     B, device = Va.shape[0], Va.device
     EPS = 1e-7
 
@@ -152,7 +157,9 @@ def gjk_batch(Va, Vb, max_iter: int = 32):
             d = w3(acd_up, n_ACD, d)
             d = w3(adb_up, n_ADB, d)
 
-    return hit | active
+    # Preserve the legacy conservative behavior by default.  New callers that
+    # need an explicit intersection witness can reject unresolved simplices.
+    return hit | active if nonconverged_is_collision else hit
 
 
 def compute_geo_pen_batch(settled_root, settled_quat, child_hull_dev, device):
