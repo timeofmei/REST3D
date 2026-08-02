@@ -119,6 +119,8 @@ from isaaclab.assets import (  # noqa: E402
 )
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg  # noqa: E402
 from isaaclab.sim import SimulationContext  # noqa: E402
+from isaaclab.sim.utils.stage import get_current_stage  # noqa: E402
+from pxr import Sdf, UsdPhysics  # noqa: E402
 
 from rest3d.optim.cem import CEMOptimizer  # noqa: E402
 from rest3d.sim.local_cem import (  # noqa: E402
@@ -130,6 +132,7 @@ from rest3d.sim.replay_scene import (  # noqa: E402
     REST_TO_LAB_QUAT_WXYZ,
     lab_states_to_rest,
     rest_states_to_lab,
+    collision_exclusion_pairs_from_records,
 )
 
 
@@ -167,7 +170,41 @@ def _active_names() -> list[str]:
 ACTIVE_NAMES = _active_names()
 MEMBER_NAMES = list(GROUP["member_names"])
 SAMPLED_NAMES = list(GROUP["direct_child_names"])
-DYNAMIC_NAMES = [name for name in MEMBER_NAMES if name != GROUP["root_name"]]
+DYNAMIC_NAMES = [
+    name
+    for name in MEMBER_NAMES
+    if name != GROUP["root_name"]
+    and not PHYSICS_ASSETS["objects"][name]["fixed"]
+]
+SEMANTIC_COLLISION_EXCLUSIONS = tuple(
+    pair
+    for pair in collision_exclusion_pairs_from_records(PHYSICS_ASSETS["objects"])
+    if set(pair) <= set(ACTIVE_NAMES)
+)
+
+
+def _apply_semantic_collision_filters(active_index) -> int:
+    stage = get_current_stage()
+    applied = 0
+    for env_index in range(ARGS.num_envs):
+        for first, second in SEMANTIC_COLLISION_EXCLUSIONS:
+            first_path = (
+                f"/World/envs/env_{env_index}/Body_{active_index[first]:04d}/base"
+            )
+            second_path = (
+                f"/World/envs/env_{env_index}/Body_{active_index[second]:04d}/base"
+            )
+            first_prim = stage.GetPrimAtPath(first_path)
+            second_prim = stage.GetPrimAtPath(second_path)
+            if not first_prim.IsValid() or not second_prim.IsValid():
+                raise RuntimeError(
+                    f"semantic collision filter body is missing: {first_path}, {second_path}"
+                )
+            UsdPhysics.FilteredPairsAPI.Apply(
+                first_prim
+            ).CreateFilteredPairsRel().AddTarget(Sdf.Path(second_path))
+            applied += 1
+    return applied
 
 
 def _scene_cfg() -> InteractiveSceneCfg:
@@ -178,7 +215,11 @@ def _scene_cfg() -> InteractiveSceneCfg:
         derived_urdf = Path(record["derived_urdf"])
         if not derived_urdf.is_file():
             raise FileNotFoundError(f"derived URDF is missing: {derived_urdf}")
-        kinematic = name == GROUP["root_name"] or name in GROUP["context_names"]
+        kinematic = (
+            PHYSICS_ASSETS["objects"][name]["fixed"]
+            or name == GROUP["root_name"]
+            or name in GROUP["context_names"]
+        )
         rigid_objects[name] = RigidObjectCfg(
             prim_path=f"{{ENV_REGEX_NS}}/Body_{index:04d}",
             spawn=sim_utils.UrdfFileCfg(
@@ -291,7 +332,9 @@ def _group_pose_indices(collection: RigidObjectCollection):
         [
             active_index[name]
             for name in ACTIVE_NAMES
-            if name == GROUP["root_name"] or name in GROUP["context_names"]
+            if PHYSICS_ASSETS["objects"][name]["fixed"]
+            or name == GROUP["root_name"]
+            or name in GROUP["context_names"]
         ],
         device=ARGS.device,
         dtype=torch.long,
@@ -377,6 +420,12 @@ def _run() -> dict:
     sim = SimulationContext(sim_utils.SimulationCfg(dt=ARGS.physics_dt, device=ARGS.device))
     physics_context = sim._physics_context
     scene = InteractiveScene(_scene_cfg())
+    configured_active_index = {
+        name: index for index, name in enumerate(ACTIVE_NAMES)
+    }
+    semantic_filter_count = _apply_semantic_collision_filters(
+        configured_active_index
+    )
     sim.reset()
     collection: RigidObjectCollection = scene["objects"]
     dt = sim.get_physics_dt()
@@ -560,6 +609,8 @@ def _run() -> dict:
     cuda_probe_value = float((last_state.square().sum() + last_force.square().sum()).item())
     finite_gpu_samples = [sample for sample in gpu_samples if sample is not None]
     checks = {
+        "semantic_collision_policy_applied": semantic_filter_count
+        == ARGS.num_envs * len(SEMANTIC_COLLISION_EXCLUSIONS),
         "physics_uses_gpu_sim": bool(physics_context.use_gpu_sim),
         "physics_uses_gpu_pipeline": bool(physics_context.use_gpu_pipeline),
         "physics_broadphase_is_gpu": physics_context.get_broadphase_type() == "GPU",

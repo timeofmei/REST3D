@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping
 
 import numpy as np
 
@@ -33,6 +34,8 @@ class ReplayObjectSpec:
     obj_path: Path
     urdf_path: Path
     fixed: bool
+    physics_role: str = "dynamic"
+    collision_policy: str = "default"
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,7 @@ class ReplaySceneSpec:
     bounds_min_rest: tuple[float, float, float]
     bounds_max_rest: tuple[float, float, float]
     asset_prefix: str = ""
+    parent_by_name: tuple[tuple[str, str], ...] = ()
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -57,6 +61,10 @@ class ReplaySceneSpec:
     @property
     def movable_names(self) -> tuple[str, ...]:
         return tuple(obj.name for obj in self.objects if not obj.fixed)
+
+    @property
+    def kinematic_names(self) -> tuple[str, ...]:
+        return tuple(obj.name for obj in self.objects if obj.physics_role == "kinematic")
 
 
 def _read_scene_tree(
@@ -79,6 +87,8 @@ def _read_scene_tree(
             "parent": parent,
             "relation": edge["relation"],
             "type": edge["type"],
+            "physics_role": edge.get("physics_role", ""),
+            "collision_policy": edge.get("collision_policy", ""),
         }
 
     declared = roots | nodes
@@ -103,14 +113,88 @@ def _read_scene_tree(
     return declared, roots, node_info
 
 
-def _is_fixed(node: str, roots: set[str], node_info: dict[str, dict[str, str]]) -> bool:
+def _physics_role(
+    node: str, roots: set[str], node_info: dict[str, dict[str, str]]
+) -> str:
     if node in roots:
-        return True
+        return "fixed"
     info = node_info[node]
-    return (
-        info["type"] == "fixed"
-        or info["relation"] in {"attach", "hang"}
-    )
+    explicit = info.get("physics_role", "")
+    if explicit:
+        if explicit not in {"dynamic", "kinematic", "fixed"}:
+            raise ValueError(f"invalid physics_role for {node}: {explicit}")
+        return explicit
+    if info["type"] == "fixed" or info["relation"] in {"attach", "hang", "on-attach"}:
+        return "fixed"
+    if info["relation"] == "supported-by":
+        return "kinematic"
+    return "dynamic"
+
+
+def _collision_policy(name: str, physics_role: str, node_info: dict) -> str:
+    if name not in node_info:
+        return "default"
+    explicit = node_info[name].get("collision_policy", "")
+    if not explicit:
+        return "support-lineage-only" if physics_role == "kinematic" else "default"
+    if explicit not in {"default", "support-lineage-only"}:
+        raise ValueError(f"invalid collision_policy for {name}: {explicit}")
+    return explicit
+
+
+def collision_exclusion_pairs_from_records(
+    records: Mapping[str, Mapping[str, object]],
+) -> tuple[tuple[str, str], ...]:
+    """Return semantic collision exclusions from a physics-manifest-like map."""
+
+    names = set(records)
+    parent_by_name = {
+        name: str(record["parent"])
+        for name, record in records.items()
+        if record.get("parent") is not None
+    }
+    children: dict[str, list[str]] = {}
+    for child, parent in parent_by_name.items():
+        children.setdefault(parent, []).append(child)
+
+    def lineage(name: str) -> set[str]:
+        related: set[str] = set()
+        current = parent_by_name.get(name)
+        while current in names:
+            if current in related:
+                break
+            related.add(current)
+            current = parent_by_name.get(current)
+        pending = list(children.get(name, []))
+        while pending:
+            current = pending.pop()
+            if current in names and current not in related:
+                related.add(current)
+                pending.extend(children.get(current, []))
+        return related
+
+    exclusions: set[tuple[str, str]] = set()
+    for name, record in records.items():
+        if record.get("collision_policy", "default") != "support-lineage-only":
+            continue
+        related = lineage(name)
+        for other in names - related - {name}:
+            exclusions.add(tuple(sorted((name, other))))
+    return tuple(sorted(exclusions))
+
+
+def collision_exclusion_pairs(scene: ReplaySceneSpec) -> tuple[tuple[str, str], ...]:
+    """Return unordered pairs excluded by semantic kinematic collision policy."""
+
+    parents = dict(scene.parent_by_name)
+    records = {
+        spec.name: {
+            "parent": parents.get(spec.name),
+            "collision_policy": spec.collision_policy,
+        }
+        for spec in scene.objects
+    }
+    return collision_exclusion_pairs_from_records(records)
 
 
 def _match_asset_names(
@@ -195,12 +279,16 @@ def load_replay_scene(
             raise ValueError(f"mesh has no usable geometry: {obj_by_name[name]}")
         bounds_min.append(np.asarray(mesh.bounds[0], dtype=np.float64))
         bounds_max.append(np.asarray(mesh.bounds[1], dtype=np.float64))
+        physics_role = _physics_role(name, roots, node_info)
+        collision_policy = _collision_policy(name, physics_role, node_info)
         objects.append(
             ReplayObjectSpec(
                 name=name,
                 obj_path=obj_by_name[name],
                 urdf_path=urdf_by_name[name],
-                fixed=_is_fixed(name, roots, node_info),
+                fixed=physics_role != "dynamic",
+                physics_role=physics_role,
+                collision_policy=collision_policy,
             )
         )
 
@@ -213,6 +301,13 @@ def load_replay_scene(
         bounds_min_rest=tuple(float(value) for value in scene_min),
         bounds_max_rest=tuple(float(value) for value in scene_max),
         asset_prefix=obj_prefix or urdf_prefix,
+        parent_by_name=tuple(
+            sorted(
+                (name, info["parent"])
+                for name, info in node_info.items()
+                if name in obj_by_name
+            )
+        ),
     )
 
 

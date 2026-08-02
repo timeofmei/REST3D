@@ -31,8 +31,11 @@ from rest3d.utils.log import get_logger, attach_file_handler
 
 logger = get_logger("stage1")
 
-_SCENE_TREE_PROMPT_VERSION = "batch-overview-v4"
-_SCENE_TREE_RELATIONS = {"on", "inside", "attach", "hang", "on-attach"}
+_SCENE_TREE_PROMPT_VERSION = "batch-overview-v5-support-semantics"
+_SCENE_TREE_RELATIONS = {
+    "on", "inside", "supported-by", "attach", "hang", "on-attach"
+}
+_SCENE_TREE_PHYSICS_ROLES = {"dynamic", "kinematic", "fixed"}
 
 
 def _excepthook(exc_type, exc_value, exc_tb):
@@ -96,11 +99,17 @@ def _normalize_scene_tree_edge(item, obj_ids, available_parents):
     if child is None or parent is None or child == parent:
         return None
     relation = str(item.get("relation", "on")).lower().strip()
+    relation = {
+        "supported_by": "supported-by",
+        "supported by": "supported-by",
+        "support": "supported-by",
+    }.get(relation, relation)
     if relation not in _SCENE_TREE_RELATIONS:
         relation = "on"
     obj_type = str(item.get("type", item.get("object_type", "movable"))).lower().strip()
     if obj_type not in {"fixed", "movable"}:
         obj_type = "movable"
+    physics_role = str(item.get("physics_role", "")).lower().strip()
     explicit_hint = _explicit_parent_hint(child, available_parents)
     if explicit_hint is not None and explicit_hint != (parent, relation):
         hinted_parent, hinted_relation = explicit_hint
@@ -109,11 +118,19 @@ def _normalize_scene_tree_edge(item, obj_ids, available_parents):
             f"{parent}/{relation} -> {hinted_parent}/{hinted_relation}"
         )
         parent, relation = explicit_hint
+    if physics_role not in _SCENE_TREE_PHYSICS_ROLES:
+        if obj_type == "fixed" or relation in {"attach", "hang", "on-attach"}:
+            physics_role = "fixed"
+        elif relation == "supported-by":
+            physics_role = "kinematic"
+        else:
+            physics_role = "dynamic"
     return {
         "child": child,
         "parent": parent,
         "relation": relation,
         "type": obj_type,
+        "physics_role": physics_role,
     }
 
 
@@ -146,6 +163,7 @@ def _parse_scene_tree_batch_response(response, obj_ids, available_parents):
                 "parent": fields[0],
                 "relation": fields[1] if len(fields) > 1 else "on",
                 "type": fields[2] if len(fields) > 2 else "movable",
+                "physics_role": fields[3] if len(fields) > 3 else "",
             })
 
     by_child = {}
@@ -216,6 +234,9 @@ Every parent MUST be one of: {parents_str}
 Relation rules:
 - "on": rests on the topmost surface of its parent.
 - "inside": rests on an intermediate surface while the parent extends above it.
+- "supported-by": partially or jointly supported while child and parent can overlap
+  vertically; use this for a body supported by furniture, an object cradled by a stand,
+  or another multi-contact arrangement whose reconstructed relative pose must be retained.
 - "attach": fixed to a wall or ceiling.
 - "hang": draped or hung from a rod, rail, or hook.
 - "on-attach": rests on the floor and is also fixed against a wall.
@@ -233,9 +254,15 @@ Type rules:
 - "fixed": built-in furniture or anything attached to wall/ceiling.
 - "movable": a person or an object that can be picked up or pushed.
 
+Physics-role rules (separate from semantic type):
+- "dynamic": a free rigid object that should settle under gravity.
+- "kinematic": a posed, articulated, or multi-contact object whose observed pose must be
+  retained during static-scene stabilization.
+- "fixed": an immovable or anchored object.
+
 Return ONLY a JSON array with exactly one entry per object, using the exact IDs above:
 [
-  {{"child": "exact_object_id", "parent": "exact_parent", "relation": "on", "type": "movable"}}
+  {{"child": "exact_object_id", "parent": "exact_parent", "relation": "on", "type": "movable", "physics_role": "dynamic"}}
 ]
 """})
     response = generate_vlm_response([{"role": "user", "content": content}])
@@ -629,6 +656,9 @@ def analyze_scene_tree(image_path, seg_obj_dir, agent_output_dir, image_stem, ll
             '- "inside": object rests on an INTERMEDIATE horizontal surface of the parent — the parent\'s structure\n'
             "  extends above the object (e.g. item on a countertop that is part of a merged cabinet system which also has upper cabinets; item stored inside a basket, box, or drawer unit).\n"
             "  Judge by looking at the WHOLE parent mask as a single object, not individual parts.\n"
+            '- "supported-by": object receives partial or multi-point support and can overlap the parent vertically;\n'
+            "  use it when bottom-to-top stacking would destroy the visible pose (e.g. a body supported by furniture\n"
+            "  or an object cradled by a stand).\n"
             '- "attach": mounted/fixed to a surface — use "wall" or "ceiling" as parent\n'
             "  - wall attach: picture frame, window, wall shelf, wall-mounted TV\n"
             "  - ceiling attach: hanging lamp, ceiling fan\n"
@@ -640,8 +670,12 @@ def analyze_scene_tree(image_path, seg_obj_dir, agent_output_dir, image_stem, ll
             "Type rules:\n"
             '- "fixed": immovable furniture (cabinets, shelves, radiators, built-in units, bookcases) or anything attached to wall/ceiling\n'
             '- "movable": can be picked up or pushed (chairs, cups, books, toys, etc.)\n\n'
+            "Physics-role rules (separate from type):\n"
+            '- "dynamic": free rigid object that should settle under gravity\n'
+            '- "kinematic": posed, articulated, or multi-contact object whose observed pose must be retained\n'
+            '- "fixed": immovable or anchored object\n\n'
             f"Output ONLY one line:\n"
-            f"{obj_id} -> parent_name | relation | type\n"
+            f"{obj_id} -> parent_name | relation | type | physics_role\n"
         )})
 
         if debug_dir is not None:
@@ -664,7 +698,7 @@ def analyze_scene_tree(image_path, seg_obj_dir, agent_output_dir, image_stem, ll
         response = generate_vlm_response(messages)
         logger.info(f"    Response: {response.strip()}")
 
-        # Parse format: obj_id -> parent | relation | type
+        # Parse format: obj_id -> parent | relation | type | physics_role
         found = False
         for line in response.strip().split("\n"):
             line = line.strip()
@@ -684,10 +718,18 @@ def analyze_scene_tree(image_path, seg_obj_dir, agent_output_dir, image_stem, ll
                 parent = fields[0]
                 relation = "on"
                 obj_type = "movable"
+            physics_role = fields[3].lower().strip() if len(fields) >= 4 else ""
             # normalize type
             obj_type = obj_type.lower().strip()
             if obj_type not in ("fixed", "movable"):
                 obj_type = "movable"
+            if physics_role not in _SCENE_TREE_PHYSICS_ROLES:
+                if obj_type == "fixed" or relation in {"attach", "hang", "on-attach"}:
+                    physics_role = "fixed"
+                elif relation == "supported-by":
+                    physics_role = "kinematic"
+                else:
+                    physics_role = "dynamic"
             parent = parent.strip()
             # Case-insensitive match
             parent_lower = parent.lower()
@@ -697,10 +739,19 @@ def analyze_scene_tree(image_path, seg_obj_dir, agent_output_dir, image_stem, ll
                 parent = "floor"
                 relation = "on"
                 obj_type = "movable"
+                physics_role = "dynamic"
             else:
                 parent = matched  # use canonical casing
-            edges.append({"child": obj_id, "parent": parent, "relation": relation, "type": obj_type})
-            result_lines.append(f"{obj_id} -> {parent} | {relation} | {obj_type}")
+            edges.append({
+                "child": obj_id,
+                "parent": parent,
+                "relation": relation,
+                "type": obj_type,
+                "physics_role": physics_role,
+            })
+            result_lines.append(
+                f"{obj_id} -> {parent} | {relation} | {obj_type} | {physics_role}"
+            )
             found = True
             break
         if not found:

@@ -287,6 +287,7 @@ def validate_global_object_sets(
 def evaluate_convex_hull_intersections_wxyz(
     states: torch.Tensor,
     convex_hull_vertices: Sequence[torch.Tensor],
+    excluded_pairs: Iterable[Tuple[int, int]] = (),
 ) -> Mapping[str, torch.Tensor]:
     """Count all pairwise convex-hull intersections for every environment.
 
@@ -324,6 +325,12 @@ def evaluate_convex_hull_intersections_wxyz(
             + states[:, object_index, :3].unsqueeze(1)
         )
 
+    excluded = {tuple(sorted((int(first), int(second)))) for first, second in excluded_pairs}
+    if any(
+        first == second or first < 0 or second >= object_count
+        for first, second in excluded
+    ):
+        raise ValueError("excluded intersection pair indices are invalid")
     total = torch.zeros(environment_count, device=states.device, dtype=states.dtype)
     per_object = torch.zeros(
         environment_count, object_count, device=states.device, dtype=states.dtype
@@ -337,6 +344,8 @@ def evaluate_convex_hull_intersections_wxyz(
     )
     for first in range(object_count):
         for second in range(first + 1, object_count):
+            if (first, second) in excluded:
+                continue
             intersects = gjk_batch(
                 world_hulls[first],
                 world_hulls[second],

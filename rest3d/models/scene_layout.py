@@ -43,7 +43,11 @@ def parse_scene_tree(path):
         c, p = e["child"], e["parent"]
         children[p].append(c)
         parent_of[c] = p
-        node_info[c] = {"relation": e["relation"], "type": e["type"]}
+        node_info[c] = {
+            "relation": e["relation"],
+            "type": e["type"],
+            "physics_role": e.get("physics_role", ""),
+        }
     if "floor" not in roots:
         raise ValueError("scene_tree has no 'floor' in roots")
     for c, p in parent_of.items():
@@ -67,7 +71,8 @@ def split_to_fixed_movable_set(node_info, parent_of, roots):
     fixed = set(roots)
     movable = set()
     for child, info in node_info.items():
-        if (info["type"] == "fixed"
+        if (info.get("physics_role") in {"fixed", "kinematic"}
+                or info["type"] == "fixed"
                 or info["relation"] == "hang"
                 or parent_of.get(child) == "wall"
                 or parent_of.get(child) == "ceiling"):
@@ -81,7 +86,8 @@ def split_to_fixed_movable_set_based_on_parent(node_info, parent_of, roots):
     fixed = set(roots)
     movable = set()
     for child, info in node_info.items():
-        if (info["relation"] == "hang"
+        if (info.get("physics_role") in {"fixed", "kinematic"}
+                or info["relation"] == "hang"
                 or parent_of.get(child) == "wall"
                 or parent_of.get(child) == "ceiling"):
             fixed.add(child)

@@ -20,6 +20,7 @@ import numpy as np
 from isaaclab.app import AppLauncher
 
 from rest3d.sim.replay_scene import (
+    collision_exclusion_pairs,
     lab_states_to_rest,
     load_replay_scene,
     rest_states_to_lab,
@@ -173,7 +174,7 @@ import isaaclab.sim as sim_utils  # noqa: E402
 from isaaclab.assets import RigidObject, RigidObjectCfg  # noqa: E402
 from isaaclab.sim import SimulationContext  # noqa: E402
 from isaaclab.sim.utils.stage import get_current_stage  # noqa: E402
-from pxr import UsdPhysics  # noqa: E402
+from pxr import Sdf, UsdPhysics  # noqa: E402
 
 
 def _package_version(name: str) -> str | None:
@@ -303,6 +304,43 @@ def _spawn_objects(logger: logging.Logger) -> dict[str, RigidObject]:
 
 def _collect_states(objects: dict[str, RigidObject]) -> torch.Tensor:
     return torch.cat([objects[name].data.root_state_w.clone() for name in SCENE.names], dim=0)
+
+
+def _rigid_body_prim_path(namespace: str) -> str:
+    root = get_current_stage().GetPrimAtPath(namespace)
+    if not root.IsValid():
+        raise RuntimeError(f"object namespace does not exist: {namespace}")
+    pending = [root]
+    rigid_body_paths: list[str] = []
+    while pending:
+        prim = pending.pop()
+        if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            rigid_body_paths.append(prim.GetPath().pathString)
+        pending.extend(prim.GetChildren())
+    if len(rigid_body_paths) != 1:
+        raise RuntimeError(
+            f"expected one rigid body below {namespace}, found {rigid_body_paths}"
+        )
+    return rigid_body_paths[0]
+
+
+def _apply_semantic_collision_filters() -> list[dict[str, str]]:
+    pairs = collision_exclusion_pairs(SCENE)
+    if not pairs:
+        return []
+    object_index = {name: index for index, name in enumerate(SCENE.names)}
+    body_paths = {
+        name: _rigid_body_prim_path(f"/World/Objects/Object_{object_index[name]:04d}")
+        for name in SCENE.names
+    }
+    stage = get_current_stage()
+    applied: list[dict[str, str]] = []
+    for first, second in pairs:
+        first_prim = stage.GetPrimAtPath(body_paths[first])
+        api = UsdPhysics.FilteredPairsAPI.Apply(first_prim)
+        api.CreateFilteredPairsRel().AddTarget(Sdf.Path(body_paths[second]))
+        applied.append({"first": first, "second": second})
+    return applied
 
 
 def _initial_target_states_lab() -> np.ndarray:
@@ -482,6 +520,8 @@ def _run() -> dict:
 
     asset_started = time.perf_counter()
     objects = _spawn_objects(logger)
+    collision_exclusions = _apply_semantic_collision_filters()
+    logger.info("semantic collision exclusions=%s", collision_exclusions)
     asset_load_seconds = time.perf_counter() - asset_started
     if tuple(objects) != SCENE.names:
         raise RuntimeError("loaded object set/order differs from the validated scene spec")
@@ -633,6 +673,8 @@ def _run() -> dict:
         "nvrtc_supports_sm120": nvrtc_version >= (12, 8),
         "all_objects_evaluated_for_stability": stability.stable.shape
         == (len(SCENE.objects),),
+        "semantic_collision_policy_applied": len(collision_exclusions)
+        == len(collision_exclusion_pairs(SCENE)),
     }
     if ARGS.state_only_benchmark:
         checks["state_only_benchmark_collection"] = not contact_views
@@ -851,7 +893,15 @@ def _run() -> dict:
             "urdf_dir": str(ARGS.urdf_dir) if ARGS.urdf_dir is not None else None,
             "object_names": list(SCENE.names),
             "fixed_names": list(SCENE.fixed_names),
+            "kinematic_names": list(SCENE.kinematic_names),
             "movable_names": list(SCENE.movable_names),
+            "physics_roles": {
+                spec.name: spec.physics_role for spec in SCENE.objects
+            },
+            "collision_policies": {
+                spec.name: spec.collision_policy for spec in SCENE.objects
+            },
+            "collision_exclusions": collision_exclusions,
             "object_count": len(SCENE.objects),
             "bounds_min_rest": list(SCENE.bounds_min_rest),
             "bounds_max_rest": list(SCENE.bounds_max_rest),

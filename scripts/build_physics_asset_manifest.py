@@ -57,6 +57,7 @@ def main() -> int:
     urdf_dir = args.output_dir / "urdf_files"
     urdf_dir.mkdir()
     records = {}
+    parent_by_name = dict(scene.parent_by_name)
     for spec in scene.objects:
         properties = analyze_physics_asset(spec.obj_path, policy)
         derived_urdf = write_physics_urdf(
@@ -67,6 +68,9 @@ def main() -> int:
         )
         records[spec.name] = {
             "fixed": spec.fixed,
+            "physics_role": spec.physics_role,
+            "collision_policy": spec.collision_policy,
+            "parent": parent_by_name.get(spec.name),
             "source_urdf": str(spec.urdf_path),
             "derived_urdf": str(derived_urdf),
             **properties.to_dict(),

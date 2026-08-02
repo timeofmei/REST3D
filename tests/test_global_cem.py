@@ -265,6 +265,18 @@ class GlobalCEMTest(unittest.TestCase):
         self.assertEqual(float(intersections["pair_matrix"][0, 0, 1].item()), 1.0)
         self.assertEqual(float(intersections["pair_matrix"][0, 1, 0].item()), 1.0)
 
+        excluded = evaluate_convex_hull_intersections_wxyz(
+            states,
+            [cube, cube.clone(), cube.clone()],
+            excluded_pairs=((0, 1),),
+        )
+        torch.testing.assert_close(
+            excluded["total"], torch.zeros(2, dtype=torch.float64)
+        )
+        torch.testing.assert_close(
+            excluded["per_object"], torch.zeros((2, 3), dtype=torch.float64)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

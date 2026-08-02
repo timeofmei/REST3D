@@ -48,6 +48,21 @@ class VlmImageEncodingTests(unittest.TestCase):
 
 
 class SceneTreeBatchTests(unittest.TestCase):
+    def test_supported_by_alias_gets_kinematic_physics_role(self):
+        objects = ["posed_body", "support"]
+        parents = ["floor", *objects]
+        response = json.dumps([{
+            "child": "posed_body",
+            "parent": "support",
+            "relation": "supported_by",
+            "type": "movable",
+        }])
+        edge = stage1._parse_scene_tree_batch_response(
+            response, objects, parents
+        )["posed_body"]
+        self.assertEqual(edge["relation"], "supported-by")
+        self.assertEqual(edge["physics_role"], "kinematic")
+
     def test_batch_json_is_validated_and_canonicalized(self):
         objects = ["desk_000", "keyboard_000"]
         parents = ["floor", "wall", *objects]

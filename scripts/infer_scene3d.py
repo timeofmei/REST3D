@@ -8,7 +8,7 @@ import argparse
 from glob import glob
 import trimesh
 import shutil
-from collections import defaultdict, deque
+from collections import defaultdict
 
 from rest3d.models.build_sam3dobj import (
     Inference,
@@ -28,6 +28,7 @@ from rest3d.utils.mesh import (
 from rest3d.utils.vis import vis_axes_ply, vis_bboxes_ply
 from rest3d.utils.urdf import generate_urdf_files
 from rest3d.utils.log import get_logger, attach_file_handler
+from rest3d.scene_support import place_to_ground
 
 logger = get_logger("stage2")
 
@@ -240,229 +241,6 @@ def y_align_with_cache(ori_results, object_names, output_obj_dir, output_obj_y_a
     return y_align_results
 
 
-def place_to_ground(output_obj_y_align_dir, output_obj_canon_dir, scene_tree_path,
-                    ceiling_height_threshold=1.8):
-    """
-    BFS over parent/child relations in scene_tree.json to adjust per-object height:
-    - children of "floor": shift so the lowest vertex sits at y = 0;
-    - children of "floor-wall": same as floor children (resting on floor while attached to a wall);
-    - children of "wall": apply the median y-offset from floor / floor-wall children (global shift that preserves relative height);
-    - children of "ceiling": same median offset as wall children;
-    - other children: place the lowest vertex on top of the (already-adjusted) parent's highest vertex;
-    - the floor itself is ignored.
-
-    Finally the ceiling height is set to max(scene max-y, ceiling_threshold).
-    Returns:
-        ceiling_height (float): resolved ceiling height
-    """
-    logger.info(f"\n{'='*60}")
-    logger.info(f"Place to ground according to scene tree...")
-    logger.info(f"{'='*60}\n")
-
-    with open(scene_tree_path) as f:
-        scene_tree = json.load(f)
-
-    # Build parent_map, children_map, and relation_map
-    parent_map = {}
-    relation_map = {}
-    children_map = defaultdict(list)
-    VALID_ROOTS = {"floor", "wall", "ceiling", "floor-wall"}
-    for edge in scene_tree["edges"]:
-        child = edge["child"]
-        parent = edge["parent"]
-        # Patch: parents starting with "the_floor_" should resolve to the root "floor"
-        if parent.startswith("the_floor"):
-            parent = "floor"
-            edge["parent"] = "floor"
-        parent_map[child] = parent
-        relation_map[child] = edge.get("relation", "on")
-        children_map[parent].append(child)
-
-    # Pre-read all OBJ vertex data
-    obj_verts = {}  # obj_name -> (vertices, lines, min_y, max_y)
-    all_nodes = set()
-    for root in scene_tree["roots"]:
-        all_nodes.update(children_map.get(root, []))
-    # BFS to collect every node
-    bfs_q = deque(all_nodes)
-    while bfs_q:
-        n = bfs_q.popleft()
-        for c in children_map.get(n, []):
-            if c not in all_nodes:
-                all_nodes.add(c)
-                bfs_q.append(c)
-
-    for obj_name in all_nodes:
-        if obj_name.startswith("the_floor"):
-            continue
-        input_path = os.path.join(output_obj_y_align_dir, f"scene_y_align_{obj_name}.obj")
-        if os.path.exists(input_path):
-            vertices, lines = read_obj_vertices(input_path)
-            min_y, max_y = get_y_bounds(vertices)
-            obj_verts[obj_name] = (vertices, lines, min_y, max_y)
-
-    # Pass 1: handle floor children, collecting y_offset to compute the reference offset
-    floor_offsets = []
-    max_y_after = {}
-    processed = set()
-
-    for obj_name in children_map.get("floor", []):
-        if obj_name.startswith("the_floor") or obj_name not in obj_verts:
-            processed.add(obj_name)
-            continue
-        vertices, lines, min_y, max_y = obj_verts[obj_name]
-        y_offset = -min_y
-        output_path = os.path.join(output_obj_canon_dir, f"scene_canon_{obj_name}.obj")
-        write_obj_with_y_offset(output_path, lines, y_offset)
-        max_y_after[obj_name] = max_y + y_offset
-        floor_offsets.append(y_offset)
-        processed.add(obj_name)
-        logger.info(f"  {obj_name}: parent=floor, y=[{min_y:.4f},{max_y:.4f}] -> [0,{max_y + y_offset:.4f}]")
-
-    # Pass 1b: handle floor-wall children (on the floor and attached to a wall); place on the floor like floor children
-    for obj_name in children_map.get("floor-wall", []):
-        if obj_name.startswith("the_floor") or obj_name not in obj_verts:
-            processed.add(obj_name)
-            continue
-        vertices, lines, min_y, max_y = obj_verts[obj_name]
-        y_offset = -min_y
-        output_path = os.path.join(output_obj_canon_dir, f"scene_canon_{obj_name}.obj")
-        write_obj_with_y_offset(output_path, lines, y_offset)
-        max_y_after[obj_name] = max_y + y_offset
-        floor_offsets.append(y_offset)
-        processed.add(obj_name)
-        logger.info(f"  {obj_name}: parent=floor-wall, y=[{min_y:.4f},{max_y:.4f}] -> [0,{max_y + y_offset:.4f}]")
-
-    # Compute the reference offset using only objects whose min_y is meaningfully negative (< -0.05),
-    # excluding outliers whose mesh is already near y = 0 (e.g. a floor lamp already reconstructed at y ~= 0)
-    significant_offsets = [o for o in floor_offsets if o > 0.05]
-    ref_offset = float(np.median(significant_offsets)) if significant_offsets else (
-        float(np.median(floor_offsets)) if floor_offsets else 0.0
-    )
-    logger.info(f"\n  Reference offset from floor/floor-wall children (median, significant only): {ref_offset:.4f}\n")
-
-    # Pass 2: handle wall children with the reference offset (global shift, preserves relative height) and clamp above the floor
-    for obj_name in children_map.get("wall", []):
-        if obj_name.startswith("the_floor") or obj_name not in obj_verts:
-            processed.add(obj_name)
-            continue
-        vertices, lines, min_y, max_y = obj_verts[obj_name]
-        y_offset = ref_offset + max(0.0, -(min_y + ref_offset))  # clamp to floor
-        output_path = os.path.join(output_obj_canon_dir, f"scene_canon_{obj_name}.obj")
-        write_obj_with_y_offset(output_path, lines, y_offset)
-        max_y_after[obj_name] = max_y + y_offset
-        processed.add(obj_name)
-        logger.info(f"  {obj_name}: parent=wall, y_offset={y_offset:.4f}, y=[{min_y:.4f},{max_y:.4f}] -> [{min_y + y_offset:.4f},{max_y + y_offset:.4f}]")
-
-    # Pass 2b: mark ceiling children as handled; the actual file write is done in Pass 2c (which does ceiling-align + floor clamp)
-    for obj_name in children_map.get("ceiling", []):
-        processed.add(obj_name)
-
-    # Pass 3: BFS over the remaining children (grandchildren and deeper)
-    queue = deque()
-    for obj_name in processed:
-        for child in children_map.get(obj_name, []):
-            if child not in processed:
-                queue.append(child)
-
-    while queue:
-        obj_name = queue.popleft()
-        if obj_name in processed:
-            continue
-
-        if obj_name.startswith("the_floor"):
-            processed.add(obj_name)
-            continue
-
-        if obj_name not in obj_verts:
-            logger.info(f"  Warning: {obj_name} obj not found, skipping")
-            processed.add(obj_name)
-            continue
-
-        vertices, lines, min_y, max_y = obj_verts[obj_name]
-        parent = parent_map.get(obj_name, "floor")
-        relation = relation_map.get(obj_name, "on")
-        output_path = os.path.join(output_obj_canon_dir, f"scene_canon_{obj_name}.obj")
-
-        if parent in max_y_after:
-            if relation == "inside":
-                # "inside": the y-align reconstruction already positions the child correctly
-                # relative to the parent (e.g. on an interior shelf). Apply the same y offset
-                # that was applied to the parent to preserve that relative position exactly.
-                _, _, p_min_y, p_max_y = obj_verts[parent]
-                parent_y_off = max_y_after[parent] - p_max_y
-                target_min_y = min_y + parent_y_off
-                logger.info(f"  {obj_name}: inside {parent}, parent_y_off={parent_y_off:.4f}, y=[{min_y:.4f},{max_y:.4f}] -> [{target_min_y:.4f},{max_y + parent_y_off:.4f}]")
-            elif relation == "hang":
-                # "hang": child top aligns with parent top + small clearance (child hangs from parent)
-                # target: child_max_y = parent_max_y + 0.005
-                # => y_offset = (max_y_after[parent] + 0.005) - max_y
-                # => min_y after = min_y + y_offset = max_y_after[parent] + 0.005 - (max_y - min_y)
-                target_max_y = max_y_after[parent] + 0.005
-                y_offset = target_max_y - max_y
-                write_obj_with_y_offset(output_path, lines, y_offset)
-                max_y_after[obj_name] = target_max_y
-                logger.info(f"  {obj_name}: hang from {parent}, top aligned: y=[{min_y:.4f},{max_y:.4f}] -> [{min_y + y_offset:.4f},{target_max_y:.4f}]")
-                processed.add(obj_name)
-                for child in children_map.get(obj_name, []):
-                    if child not in processed:
-                        queue.append(child)
-                continue
-            else:
-                target_min_y = max_y_after[parent] + 0.005
-
-            y_offset = target_min_y - min_y
-            write_obj_with_y_offset(output_path, lines, y_offset)
-            max_y_after[obj_name] = max_y + y_offset
-            logger.info(f"  {obj_name}: parent={parent} ({relation}), y=[{min_y:.4f},{max_y:.4f}] -> [{target_min_y:.4f},{max_y + y_offset:.4f}]")
-        else:
-            # Parent unprocessed (unexpected): drop the object onto the floor
-            y_offset = -min_y
-            write_obj_with_y_offset(output_path, lines, y_offset)
-            max_y_after[obj_name] = max_y + y_offset
-            logger.info(f"  {obj_name}: parent={parent} (unprocessed), fallback to floor, y -> [0,{max_y + y_offset:.4f}]")
-
-        processed.add(obj_name)
-
-        for child in children_map.get(obj_name, []):
-            if child not in processed:
-                queue.append(child)
-
-    # Determine ceiling height: take max over non-ceiling-child top points and the threshold
-    # (ceiling children themselves are excluded to avoid a circular dependency)
-    ceiling_children = set(children_map.get("ceiling", []))
-    non_ceiling_max = max(
-        (v for k, v in max_y_after.items() if k not in ceiling_children),
-        default=0.0
-    )
-    ceiling_height = max(non_ceiling_max, ceiling_height_threshold)
-    logger.info(f"\n  Non-ceiling scene max Y: {non_ceiling_max:.4f}, ceiling threshold: {ceiling_height_threshold:.4f}")
-    logger.info(f"  Ceiling height: {ceiling_height:.4f}")
-
-    # Pass 2c: shift ceiling children by ref_offset (same as wall children),
-    # then push them down only if they overshoot ceiling_height (do not force-align to it).
-    # This preserves relative height in the y-align coordinate frame and prevents the ceiling_height threshold
-    # from pushing already-reasonable objects (e.g. a chandelier) too high.
-    for obj_name in ceiling_children:
-        if obj_name not in obj_verts:
-            continue
-        vertices, lines, min_y, max_y = obj_verts[obj_name]
-        # Step 1: shift by ref_offset and clamp above the floor (same rule as wall children)
-        y_offset = ref_offset + max(0.0, -(min_y + ref_offset))
-        # Step 2: push down if any vertex still exceeds ceiling_height
-        if max_y + y_offset > ceiling_height:
-            y_offset = ceiling_height - max_y
-            y_offset = max(y_offset, -min_y)  # clamp above floor again
-        output_path = os.path.join(output_obj_canon_dir, f"scene_canon_{obj_name}.obj")
-        write_obj_with_y_offset(output_path, lines, y_offset)
-        max_y_after[obj_name] = max_y + y_offset
-        logger.info(f"  {obj_name}: ceiling-ref_offset, y=[{min_y:.4f},{max_y:.4f}] -> [{min_y + y_offset:.4f},{max_y + y_offset:.4f}]")
-
-    logger.info(f"  Processed {len(processed)} objects -> {output_obj_canon_dir}")
-
-    return ceiling_height
-
-
 def main():
     parser = argparse.ArgumentParser(description="Batch inference script for SAM3D-Objects")
 
@@ -634,7 +412,11 @@ def main():
             )
         shutil.copy(scene_tree_src, output_tree)
         place_to_ground(
-            output_obj_y_align_dir, output_obj_canon_dir, output_tree
+            output_obj_y_align_dir,
+            output_obj_canon_dir,
+            output_tree,
+            report_path=os.path.join(output_dir, "support_diagnostics.json"),
+            resolved_scene_tree_path=output_tree,
         )
 
         # ========================================================================

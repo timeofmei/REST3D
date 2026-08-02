@@ -141,6 +141,8 @@ from isaaclab.assets import (  # noqa: E402
 )
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg  # noqa: E402
 from isaaclab.sim import SimulationContext  # noqa: E402
+from isaaclab.sim.utils.stage import get_current_stage  # noqa: E402
+from pxr import Sdf, UsdPhysics  # noqa: E402
 
 from rest3d.optim.cem import CEMOptimizer  # noqa: E402
 from rest3d.sim.global_cem import (  # noqa: E402
@@ -164,6 +166,7 @@ from rest3d.sim.replay_scene import (  # noqa: E402
     LAB_TO_REST_ROTATION,
     REST_TO_LAB_QUAT_WXYZ,
     rest_states_to_lab,
+    collision_exclusion_pairs_from_records,
 )
 from rest3d.utils.mesh import load_trimesh_any  # noqa: E402
 
@@ -173,6 +176,45 @@ ALL_NAMES = list(PLAN.scene_names)
 SAMPLED_NAMES = list(PLAN.sampled_entity_names)
 FIXED_NAMES = list(PLAN.fixed_names)
 GROUND_FILTER_NAME = "__ground__"
+SEMANTIC_COLLISION_EXCLUSIONS = collision_exclusion_pairs_from_records(
+    PHYSICS_ASSETS["objects"]
+)
+
+
+def _apply_semantic_collision_filters():
+    stage = get_current_stage()
+    active_index = {name: index for index, name in enumerate(ALL_NAMES)}
+    applied = 0
+    for env_index in range(ARGS.num_envs):
+        for first, second in SEMANTIC_COLLISION_EXCLUSIONS:
+            first_path = (
+                "/World/envs/env_%d/Body_%04d/base"
+                % (env_index, active_index[first])
+            )
+            second_path = (
+                "/World/envs/env_%d/Body_%04d/base"
+                % (env_index, active_index[second])
+            )
+            first_prim = stage.GetPrimAtPath(first_path)
+            second_prim = stage.GetPrimAtPath(second_path)
+            if not first_prim.IsValid() or not second_prim.IsValid():
+                raise RuntimeError(
+                    "semantic collision filter body is missing: %s, %s"
+                    % (first_path, second_path)
+                )
+            UsdPhysics.FilteredPairsAPI.Apply(
+                first_prim
+            ).CreateFilteredPairsRel().AddTarget(Sdf.Path(second_path))
+            applied += 1
+    return applied
+
+
+def _excluded_intersection_indices():
+    active_index = {name: index for index, name in enumerate(ALL_NAMES)}
+    return tuple(
+        (active_index[first], active_index[second])
+        for first, second in SEMANTIC_COLLISION_EXCLUSIONS
+    )
 
 
 def _package_version(name):
@@ -514,6 +556,7 @@ def _run():
     )
     physics_context = sim._physics_context
     scene = InteractiveScene(_scene_cfg())
+    semantic_filter_count = _apply_semantic_collision_filters()
     sim.reset()
     collection = scene["objects"]
     if not isinstance(collection, RigidObjectCollection):
@@ -636,7 +679,9 @@ def _run():
         ) = _contact_snapshot(contact_views, dt)
         contact_capacity_saturated = contact_capacity_saturated or saturated
         placement_geometry = evaluate_convex_hull_intersections_wxyz(
-            placed_rest.to(dtype=torch.float64), convex_hulls
+            placed_rest.to(dtype=torch.float64),
+            convex_hulls,
+            excluded_pairs=_excluded_intersection_indices(),
         )
 
         early = None
@@ -659,7 +704,9 @@ def _run():
         ) = _contact_snapshot(contact_views, dt)
         contact_capacity_saturated = contact_capacity_saturated or saturated
         settled_geometry = evaluate_convex_hull_intersections_wxyz(
-            settled_rest.to(dtype=torch.float64), convex_hulls
+            settled_rest.to(dtype=torch.float64),
+            convex_hulls,
+            excluded_pairs=_excluded_intersection_indices(),
         )
         energy = evaluate_global_cem_energy(
             PLAN,
@@ -798,16 +845,20 @@ def _run():
             best_placed_rest_state, device=ARGS.device, dtype=torch.float64
         ).unsqueeze(0),
         convex_hulls,
+        excluded_pairs=_excluded_intersection_indices(),
     )
     best_export_settled_geometry = evaluate_convex_hull_intersections_wxyz(
         torch.as_tensor(
             best_settled_rest_state, device=ARGS.device, dtype=torch.float64
         ).unsqueeze(0),
         convex_hulls,
+        excluded_pairs=_excluded_intersection_indices(),
     )
     best_export_placed_count = float(best_export_placed_geometry["total"].item())
     best_export_settled_count = float(best_export_settled_geometry["total"].item())
     checks = {
+        "semantic_collision_policy_applied": semantic_filter_count
+        == ARGS.num_envs * len(SEMANTIC_COLLISION_EXCLUSIONS),
         "physics_uses_gpu_sim": bool(physics_context.use_gpu_sim),
         "physics_uses_gpu_pipeline": bool(physics_context.use_gpu_pipeline),
         "physics_broadphase_is_gpu": physics_context.get_broadphase_type() == "GPU",

@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from rest3d.sim.replay_scene import (
+    collision_exclusion_pairs,
     gym_states_xyzw_to_rest,
     lab_states_to_rest,
     load_replay_scene,
@@ -15,6 +16,23 @@ from rest3d.sim.replay_scene import (
 
 
 class ReplaySceneTest(unittest.TestCase):
+    def test_explicit_kinematic_role_is_not_a_free_rigid_body(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            tree_path, scene_dir = self._write_scene(root)
+            tree = json.loads(tree_path.read_text(encoding="utf-8"))
+            tree["edges"][0]["physics_role"] = "kinematic"
+            tree_path.write_text(json.dumps(tree), encoding="utf-8")
+            scene = load_replay_scene(tree_path, scene_dir)
+
+            self.assertIn("movable_asset", scene.fixed_names)
+            self.assertIn("movable_asset", scene.kinematic_names)
+            self.assertNotIn("movable_asset", scene.movable_names)
+            self.assertEqual(
+                collision_exclusion_pairs(scene),
+                (("fixed_asset", "movable_asset"),),
+            )
+
     def _write_scene(self, root: Path) -> tuple[Path, Path]:
         scene_dir = root / "scene"
         obj_dir = scene_dir / "obj_files"
