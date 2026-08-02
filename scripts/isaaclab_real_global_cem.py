@@ -759,11 +759,18 @@ def _run():
                 for name, values in per_object.items()
             }
         if len(FIXED_NAMES):
+            # Promote to float64: in float32 an otherwise identical quaternion
+            # dot product can round below one, so 2*acos reports ~6.9e-4 rad
+            # even when the kinematic body never moved (see the relative-pose
+            # check below for the same quantization).
             fixed_position_error = torch.linalg.vector_norm(
-                settled[:, fixed_indices, :3] - placed[:, fixed_indices, :3], dim=-1
+                settled[:, fixed_indices, :3].to(dtype=torch.float64)
+                - placed[:, fixed_indices, :3].to(dtype=torch.float64),
+                dim=-1,
             ).max()
             fixed_rotation_error = quaternion_geodesic_distance_wxyz(
-                settled[:, fixed_indices, 3:7], placed[:, fixed_indices, 3:7]
+                settled[:, fixed_indices, 3:7].to(dtype=torch.float64),
+                placed[:, fixed_indices, 3:7].to(dtype=torch.float64),
             ).max()
             maximum_fixed_position_error = max(
                 maximum_fixed_position_error, float(fixed_position_error.item())
