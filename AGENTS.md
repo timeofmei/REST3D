@@ -9,12 +9,13 @@ These instructions apply to the entire repository.
 - All future development is based on the current branch (`main`, which was
   reset to `fbbcc0e` and merged with the y-align orientation fix; see
   `doc/2026-8-2.md` 问题 2 for the full history).
-- Do not consult, reference, or merge from the backup branches
+- Do not consult, reference, or merge from the archive branches
   (`backup/main-at-fbf240d`, `fix/scene-support-semantics`,
   `experiment/isaac-lab-migration`, or the pre-reset `origin/main` history)
   unless the user explicitly mentions them. They exist only to preserve the
-  discarded Isaac Lab migration / scene-support work; treat them as
-  read-only archives.
+  discarded Isaac Lab migration / scene-support work. They are mirrored to
+  `origin/` and treated as read-only archives; never advance or delete them
+  without explicit user instruction.
 - The current `main` contains no Isaac Lab code. All `isaaclab`/`isaac-lab`
   references in `doc/` and `environments/` are stale archive material from
   the discarded work; they describe scripts and workflows that do not exist
