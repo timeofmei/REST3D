@@ -1,6 +1,7 @@
 # Installation
 
-REST3D uses two conda environments: `rest3d` for scene reconstruction (Stages 1–2) and `gym` for scene stabilization using Isaac Gym (Stage 3).
+REST3D uses `rest3d` for scene reconstruction (Stages 1–2) and `gym` for the
+Isaac Gym Stage 3 backend.
 
 **1. Clone this repo**
 ```bash
