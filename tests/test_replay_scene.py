@@ -7,6 +7,7 @@ import numpy as np
 
 from rest3d.sim.replay_scene import (
     collision_exclusion_pairs,
+    collision_exclusion_pairs_from_records,
     gym_states_xyzw_to_rest,
     lab_states_to_rest,
     load_replay_scene,
@@ -16,6 +17,27 @@ from rest3d.sim.replay_scene import (
 
 
 class ReplaySceneTest(unittest.TestCase):
+    def test_kinematic_isolation_excludes_parent_and_unrelated_objects(self):
+        records = {
+            "support": {"parent": "floor", "collision_policy": "default"},
+            "anchor": {
+                "parent": "support",
+                "collision_policy": "kinematic-isolated",
+            },
+            "other": {"parent": "floor", "collision_policy": "default"},
+        }
+
+        self.assertEqual(
+            collision_exclusion_pairs_from_records(records),
+            (("anchor", "other"), ("anchor", "support")),
+        )
+
+        records["anchor"]["collision_policy"] = "support-lineage-only"
+        self.assertEqual(
+            collision_exclusion_pairs_from_records(records),
+            (("anchor", "other"),),
+        )
+
     def test_explicit_kinematic_role_is_not_a_free_rigid_body(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -28,6 +50,22 @@ class ReplaySceneTest(unittest.TestCase):
             self.assertIn("movable_asset", scene.fixed_names)
             self.assertIn("movable_asset", scene.kinematic_names)
             self.assertNotIn("movable_asset", scene.movable_names)
+            self.assertEqual(collision_exclusion_pairs(scene), ())
+
+    def test_partial_support_kinematic_defaults_to_isolated_collision(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            tree_path, scene_dir = self._write_scene(root)
+            tree = json.loads(tree_path.read_text(encoding="utf-8"))
+            tree["edges"][0].update(
+                {
+                    "physics_role": "kinematic",
+                    "relation": "supported-by",
+                }
+            )
+            tree_path.write_text(json.dumps(tree), encoding="utf-8")
+            scene = load_replay_scene(tree_path, scene_dir)
+
             self.assertEqual(
                 collision_exclusion_pairs(scene),
                 (("fixed_asset", "movable_asset"),),

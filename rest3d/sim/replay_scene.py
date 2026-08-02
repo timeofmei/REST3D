@@ -134,10 +134,18 @@ def _physics_role(
 def _collision_policy(name: str, physics_role: str, node_info: dict) -> str:
     if name not in node_info:
         return "default"
-    explicit = node_info[name].get("collision_policy", "")
+    info = node_info[name]
+    explicit = info.get("collision_policy", "")
     if not explicit:
-        return "support-lineage-only" if physics_role == "kinematic" else "default"
-    if explicit not in {"default", "support-lineage-only"}:
+        partial_support = info.get("relation") == "supported-by" or (
+            info.get("support_mode") == "preserve-relative"
+        )
+        return (
+            "kinematic-isolated"
+            if physics_role == "kinematic" and partial_support
+            else "default"
+        )
+    if explicit not in {"default", "support-lineage-only", "kinematic-isolated"}:
         raise ValueError(f"invalid collision_policy for {name}: {explicit}")
     return explicit
 
@@ -175,7 +183,12 @@ def collision_exclusion_pairs_from_records(
 
     exclusions: set[tuple[str, str]] = set()
     for name, record in records.items():
-        if record.get("collision_policy", "default") != "support-lineage-only":
+        policy = record.get("collision_policy", "default")
+        if policy == "kinematic-isolated":
+            for other in names - {name}:
+                exclusions.add(tuple(sorted((name, other))))
+            continue
+        if policy != "support-lineage-only":
             continue
         related = lineage(name)
         for other in names - related - {name}:

@@ -10,8 +10,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import trimesh
+from scipy.spatial import cKDTree
 
-from rest3d.utils.mesh import read_obj_vertices, write_obj_with_y_offset
+from rest3d.utils.mesh import read_obj_vertices
 
 
 _LOGGER = logging.getLogger("stage2")
@@ -94,6 +96,164 @@ def _record(
     }
 
 
+def _write_obj_with_translation(
+    output_path: Path, lines: list[str], translation: np.ndarray
+) -> None:
+    """Write an OBJ after a pure translation while preserving vertex colors."""
+
+    with output_path.open("w", encoding="utf-8") as file_obj:
+        for line in lines:
+            if not line.startswith("v "):
+                file_obj.write(line)
+                continue
+            parts = line.split()
+            position = np.asarray(parts[1:4], dtype=np.float64) + translation
+            extra = parts[4:]
+            suffix = f" {' '.join(extra)}" if extra else ""
+            file_obj.write(
+                f"v {position[0]} {position[1]} {position[2]}{suffix}\n"
+            )
+
+
+def _descendants_excluding_subtrees(
+    root: str,
+    children_map: dict[str, list[str]],
+    excluded_roots: set[str],
+) -> list[str]:
+    descendants: list[str] = []
+    queue = deque(children_map.get(root, []))
+    while queue:
+        name = queue.popleft()
+        if name in excluded_roots:
+            continue
+        descendants.append(name)
+        queue.extend(children_map.get(name, []))
+    return descendants
+
+
+def _as_trimesh(path: Path) -> trimesh.Trimesh:
+    loaded = trimesh.load(path, force="mesh", process=False)
+    if isinstance(loaded, trimesh.Scene):
+        if not loaded.geometry:
+            raise ValueError(f"mesh scene has no geometry: {path}")
+        loaded = trimesh.util.concatenate(tuple(loaded.geometry.values()))
+    if not isinstance(loaded, trimesh.Trimesh) or not len(loaded.faces):
+        raise ValueError(f"mesh has no usable faces: {path}")
+    return loaded
+
+
+def _weighted_quantile(
+    values: np.ndarray, weights: np.ndarray, quantile: float
+) -> float:
+    order = np.argsort(values)
+    sorted_values = values[order]
+    cumulative = np.cumsum(weights[order])
+    target = quantile * float(cumulative[-1])
+    index = min(np.searchsorted(cumulative, target), len(values) - 1)
+    return float(sorted_values[index])
+
+
+def _partial_support_surface_gap(
+    *,
+    child_path: Path,
+    parent_path: Path,
+    child_translation: np.ndarray,
+    parent_translation: np.ndarray,
+    normal_y_threshold: float,
+    contact_quantile: float,
+    maximum_gap_m: float,
+) -> tuple[float | None, dict[str, Any]]:
+    """Estimate the first substantial child-bottom/parent-top surface gap.
+
+    Global extrema cannot describe partial support: a seated figure's lowest
+    point is a shoe and a chair's highest point is usually its backrest.  This
+    instead pairs locally overlapping downward- and upward-facing triangles,
+    then uses a low area-weighted gap quantile to ignore isolated near-misses.
+    """
+
+    child_mesh = _as_trimesh(child_path)
+    parent_mesh = _as_trimesh(parent_path)
+    child_mask = child_mesh.face_normals[:, 1] <= -normal_y_threshold
+    parent_mask = parent_mesh.face_normals[:, 1] >= normal_y_threshold
+    if not np.any(child_mask) or not np.any(parent_mask):
+        return None, {"reason": "insufficient-horizontal-surfaces"}
+
+    child_centers = child_mesh.triangles_center[child_mask] + child_translation
+    parent_centers = parent_mesh.triangles_center[parent_mask] + parent_translation
+    child_areas = (
+        child_mesh.area_faces[child_mask]
+        * -child_mesh.face_normals[child_mask, 1]
+    )
+    parent_areas = (
+        parent_mesh.area_faces[parent_mask]
+        * parent_mesh.face_normals[parent_mask, 1]
+    )
+    child_valid = child_areas > 1.0e-10
+    parent_valid = parent_areas > 1.0e-10
+    child_centers = child_centers[child_valid]
+    child_areas = child_areas[child_valid]
+    parent_centers = parent_centers[parent_valid]
+    if not len(child_centers) or not len(parent_centers):
+        return None, {"reason": "insufficient-nondegenerate-surfaces"}
+
+    parent_xz_extent = np.ptp(parent_centers[:, [0, 2]], axis=0)
+    parent_xz_diagonal = float(np.linalg.norm(parent_xz_extent))
+    dense_mesh_radius = float(np.clip(0.04 * parent_xz_diagonal, 0.008, 0.025))
+    sparse_face_radius = float(np.sqrt(np.quantile(parent_areas[parent_valid], 0.9)))
+    search_radius = max(
+        dense_mesh_radius,
+        min(0.25 * parent_xz_diagonal, sparse_face_radius),
+    )
+    neighbor_count = min(24, len(parent_centers))
+    _, indices = cKDTree(parent_centers[:, [0, 2]]).query(
+        child_centers[:, [0, 2]],
+        k=neighbor_count,
+        distance_upper_bound=search_radius,
+        workers=-1,
+    )
+    if neighbor_count == 1:
+        indices = indices[:, None]
+
+    valid_neighbor = indices < len(parent_centers)
+    parent_y = np.full(indices.shape, -np.inf, dtype=np.float64)
+    parent_y[valid_neighbor] = parent_centers[indices[valid_neighbor], 1]
+    below_child = valid_neighbor & (
+        parent_y <= child_centers[:, 1, None] + 0.002
+    )
+    parent_y[~below_child] = -np.inf
+    highest_parent_y = parent_y.max(axis=1)
+    matched = np.isfinite(highest_parent_y)
+    gaps = child_centers[matched, 1] - highest_parent_y[matched]
+    weights = child_areas[matched]
+    usable = (gaps >= 0.0) & (gaps <= maximum_gap_m)
+    gaps = gaps[usable]
+    weights = weights[usable]
+
+    child_footprint_area = float(
+        np.prod(np.maximum(0.0, np.ptp(child_mesh.vertices[:, [0, 2]], axis=0)))
+    )
+    matched_area = float(weights.sum())
+    minimum_evidence_area = max(1.0e-5, 0.005 * child_footprint_area)
+    if not len(gaps) or matched_area < minimum_evidence_area:
+        return None, {
+            "reason": "insufficient-overlapping-surface-area",
+            "matched_projected_area_m2": matched_area,
+            "minimum_projected_area_m2": minimum_evidence_area,
+            "search_radius_m": search_radius,
+        }
+
+    gap = _weighted_quantile(gaps, weights, contact_quantile)
+    return gap, {
+        "method": "local-horizontal-face-correspondence",
+        "estimated_gap_m": gap,
+        "contact_quantile": contact_quantile,
+        "matched_projected_area_m2": matched_area,
+        "minimum_projected_area_m2": minimum_evidence_area,
+        "search_radius_m": search_radius,
+        "normal_y_threshold": normal_y_threshold,
+    }
+
+
 def place_to_ground(
     output_obj_y_align_dir: str | os.PathLike[str],
     output_obj_canon_dir: str | os.PathLike[str],
@@ -105,6 +265,11 @@ def place_to_ground(
     clearance_m: float = 0.005,
     complex_overlap_m: float = 0.05,
     complex_parent_overlap_fraction: float = 0.25,
+    partial_support_min_xz_overlap_ratio: float = 0.5,
+    partial_support_max_parent_shift_m: float = 0.35,
+    partial_support_max_child_drop_m: float = 0.2,
+    partial_support_contact_quantile: float = 0.05,
+    partial_support_surface_normal_y: float = 0.65,
 ) -> float:
     """Translate y-aligned meshes vertically according to support semantics.
 
@@ -132,6 +297,7 @@ def place_to_ground(
     parent_map: dict[str, str] = {}
     relation_map: dict[str, str] = {}
     type_map: dict[str, str] = {}
+    physics_role_map: dict[str, str] = {}
     children_map: dict[str, list[str]] = defaultdict(list)
     for edge in scene_tree.get("edges", []):
         child = edge["child"]
@@ -141,6 +307,7 @@ def place_to_ground(
         parent_map[child] = parent
         relation_map[child] = edge.get("relation", "on")
         type_map[child] = edge.get("type", "movable")
+        physics_role_map[child] = edge.get("physics_role", "")
         children_map[parent].append(child)
 
     all_nodes: set[str] = set()
@@ -164,13 +331,16 @@ def place_to_ground(
         vertices, lines = read_obj_vertices(str(path))
         minimum, maximum = _bounds(vertices)
         objects[name] = {
+            "path": path,
             "vertices": vertices,
             "lines": lines,
             "minimum": minimum,
             "maximum": maximum,
+            "center": np.asarray(vertices, dtype=np.float64).mean(axis=0),
         }
 
     offsets: dict[str, float] = {}
+    translations: dict[str, np.ndarray] = {}
     output_max_y: dict[str, float] = {}
     processed: set[str] = set()
     records: dict[str, dict[str, Any]] = {}
@@ -184,8 +354,10 @@ def place_to_ground(
     ) -> None:
         data = objects[name]
         output_path = output_dir / f"scene_canon_{name}.obj"
-        write_obj_with_y_offset(str(output_path), data["lines"], y_offset)
+        translation = np.array([0.0, y_offset, 0.0], dtype=np.float64)
+        _write_obj_with_translation(output_path, data["lines"], translation)
         offsets[name] = float(y_offset)
+        translations[name] = translation
         output_max_y[name] = float(data["maximum"][1] + y_offset)
         _record(
             records,
@@ -324,6 +496,213 @@ def place_to_ground(
             y_offset = max(ceiling_height - float(maximum[1]), -float(minimum[1]))
         write_object(name, y_offset, "ceiling-relative")
 
+    # A partially supported kinematic child is a reconstructed world-space
+    # anchor, not a payload that should be snapped onto a parent's global AABB
+    # top. If the source reconstruction only places the parent under a small
+    # edge of that anchor, move the parent horizontally beneath the supported
+    # object. Ordinary descendants follow the parent, while anchored child
+    # subtrees retain their world pose.
+    partial_children_by_parent: dict[str, list[str]] = defaultdict(list)
+    for child, record in records.items():
+        partial_support = record["relation"] == "supported-by" or (
+            record["relation"] == "on"
+            and record["placement_mode"].startswith("preserve-relative")
+        )
+        explicit_role = physics_role_map.get(child, "")
+        is_kinematic_anchor = explicit_role == "kinematic" or (
+            not explicit_role and partial_support
+        )
+        if is_kinematic_anchor:
+            parent = record["parent"]
+            if parent in records and parent in objects:
+                partial_children_by_parent[parent].append(child)
+
+    for parent, anchor_children in partial_children_by_parent.items():
+        current_parent_min = objects[parent]["minimum"] + translations[parent]
+        current_parent_max = objects[parent]["maximum"] + translations[parent]
+        overlap_before = {
+            child: _xz_overlap_ratio(
+                objects[child]["minimum"] + translations[child],
+                objects[child]["maximum"] + translations[child],
+                current_parent_min,
+                current_parent_max,
+            )
+            for child in anchor_children
+            if child in objects and child in translations
+        }
+        if not overlap_before:
+            continue
+
+        shift = np.zeros(3, dtype=np.float64)
+        if min(overlap_before.values()) < partial_support_min_xz_overlap_ratio:
+            child_centers = np.stack(
+                [
+                    objects[child]["center"] + translations[child]
+                    for child in overlap_before
+                ]
+            )
+            parent_center = objects[parent]["center"] + translations[parent]
+            shift[[0, 2]] = (
+                child_centers[:, [0, 2]].mean(axis=0) - parent_center[[0, 2]]
+            )
+            horizontal_norm = float(np.linalg.norm(shift[[0, 2]]))
+            if horizontal_norm > partial_support_max_parent_shift_m:
+                shift *= partial_support_max_parent_shift_m / horizontal_norm
+
+        def overlap_after_fraction(fraction: float) -> dict[str, float]:
+            candidate_min = current_parent_min + fraction * shift
+            candidate_max = current_parent_max + fraction * shift
+            return {
+                child: _xz_overlap_ratio(
+                    objects[child]["minimum"] + translations[child],
+                    objects[child]["maximum"] + translations[child],
+                    candidate_min,
+                    candidate_max,
+                )
+                for child in overlap_before
+            }
+
+        # Preserve as much of the reconstructed parent pose as possible. Search
+        # only along the center-alignment direction and stop as soon as every
+        # anchor reaches the requested footprint coverage.
+        full_shift_overlap = overlap_after_fraction(1.0)
+        if (
+            np.any(shift)
+            and min(full_shift_overlap.values())
+            >= partial_support_min_xz_overlap_ratio
+        ):
+            lower = 0.0
+            upper = 1.0
+            for _ in range(40):
+                middle = 0.5 * (lower + upper)
+                if (
+                    min(overlap_after_fraction(middle).values())
+                    >= partial_support_min_xz_overlap_ratio
+                ):
+                    upper = middle
+                else:
+                    lower = middle
+            shift *= upper
+
+        excluded_roots = set(overlap_before)
+        moved_names = [parent] + _descendants_excluding_subtrees(
+            parent, children_map, excluded_roots
+        )
+        moved_names = [
+            name for name in moved_names if name in objects and name in translations
+        ]
+        for moved_name in moved_names:
+            translations[moved_name] = translations[moved_name] + shift
+            _write_obj_with_translation(
+                output_dir / f"scene_canon_{moved_name}.obj",
+                objects[moved_name]["lines"],
+                translations[moved_name],
+            )
+            record = records[moved_name]
+            record["translation_m"] = translations[moved_name].tolist()
+            record["output_bounds_min_m"] = (
+                objects[moved_name]["minimum"] + translations[moved_name]
+            ).tolist()
+            record["output_bounds_max_m"] = (
+                objects[moved_name]["maximum"] + translations[moved_name]
+            ).tolist()
+
+        adjusted_parent_min = objects[parent]["minimum"] + translations[parent]
+        adjusted_parent_max = objects[parent]["maximum"] + translations[parent]
+        overlap_after = {
+            child: _xz_overlap_ratio(
+                objects[child]["minimum"] + translations[child],
+                objects[child]["maximum"] + translations[child],
+                adjusted_parent_min,
+                adjusted_parent_max,
+            )
+            for child in overlap_before
+        }
+        records[parent]["partial_support_alignment"] = {
+            "anchor_children": sorted(overlap_before),
+            "horizontal_shift_m": shift.tolist(),
+            "moved_objects": moved_names,
+            "xz_overlap_ratio_before": overlap_before,
+            "xz_overlap_ratio_after": overlap_after,
+            "minimum_required_xz_overlap_ratio": partial_support_min_xz_overlap_ratio,
+        }
+        for child in overlap_before:
+            records[child]["output_xz_child_overlap_ratio"] = overlap_after[child]
+            records[child]["support_parent_horizontal_shift_m"] = shift.tolist()
+        _LOGGER.info(
+            "  %s: align partial support under %s, shift=[%.4f, %.4f] m",
+            parent,
+            sorted(overlap_before),
+            shift[0],
+            shift[2],
+        )
+
+        # Once the support is horizontally beneath the anchor, close the local
+        # support-surface gap by moving the anchored child subtree.  The parent
+        # remains floor-contact, and the anchor is never dropped through the
+        # floor or farther than the conservative configured limit.
+        for child in overlap_before:
+            gap, contact_details = _partial_support_surface_gap(
+                child_path=objects[child]["path"],
+                parent_path=objects[parent]["path"],
+                child_translation=translations[child],
+                parent_translation=translations[parent],
+                normal_y_threshold=partial_support_surface_normal_y,
+                contact_quantile=partial_support_contact_quantile,
+                maximum_gap_m=partial_support_max_child_drop_m + clearance_m,
+            )
+            records[child]["partial_support_contact"] = contact_details
+            if gap is None or gap <= clearance_m:
+                continue
+
+            requested_drop = min(
+                gap - clearance_m, partial_support_max_child_drop_m
+            )
+            available_floor_clearance = max(
+                0.0,
+                float(objects[child]["minimum"][1] + translations[child][1]),
+            )
+            applied_drop = min(requested_drop, available_floor_clearance)
+            vertical_shift = np.array([0.0, -applied_drop, 0.0], dtype=np.float64)
+            moved_anchor_names = [child] + _descendants_excluding_subtrees(
+                child, children_map, set()
+            )
+            moved_anchor_names = [
+                name
+                for name in moved_anchor_names
+                if name in objects and name in translations
+            ]
+            for moved_name in moved_anchor_names:
+                translations[moved_name] = translations[moved_name] + vertical_shift
+                _write_obj_with_translation(
+                    output_dir / f"scene_canon_{moved_name}.obj",
+                    objects[moved_name]["lines"],
+                    translations[moved_name],
+                )
+                record = records[moved_name]
+                record["translation_m"] = translations[moved_name].tolist()
+                record["output_bounds_min_m"] = (
+                    objects[moved_name]["minimum"] + translations[moved_name]
+                ).tolist()
+                record["output_bounds_max_m"] = (
+                    objects[moved_name]["maximum"] + translations[moved_name]
+                ).tolist()
+            contact_details.update(
+                {
+                    "target_clearance_m": clearance_m,
+                    "requested_child_drop_m": requested_drop,
+                    "applied_child_drop_m": applied_drop,
+                    "floor_limited": applied_drop < requested_drop,
+                    "moved_objects": moved_anchor_names,
+                }
+            )
+            _LOGGER.info(
+                "  %s: close local support gap above %s, drop=%.4f m",
+                child,
+                parent,
+                applied_drop,
+            )
+
     report = {
         "schema_version": 1,
         "scene_tree": str(tree_path),
@@ -333,6 +712,11 @@ def place_to_ground(
             "clearance_m": clearance_m,
             "complex_overlap_m": complex_overlap_m,
             "complex_parent_overlap_fraction": complex_parent_overlap_fraction,
+            "partial_support_min_xz_overlap_ratio": partial_support_min_xz_overlap_ratio,
+            "partial_support_max_parent_shift_m": partial_support_max_parent_shift_m,
+            "partial_support_max_child_drop_m": partial_support_max_child_drop_m,
+            "partial_support_contact_quantile": partial_support_contact_quantile,
+            "partial_support_surface_normal_y": partial_support_surface_normal_y,
             "ceiling_height_threshold_m": ceiling_height_threshold,
         },
         "reference_scene_y_offset_m": reference_offset,
@@ -351,11 +735,11 @@ def place_to_ground(
             edge["support_mode"] = (
                 "preserve-relative" if mode.startswith("preserve-relative") else mode
             )
+            partial_support = edge.get("relation") == "supported-by" or (
+                edge.get("relation") == "on"
+                and mode.startswith("preserve-relative")
+            )
             if "physics_role" not in edge:
-                partial_support = edge.get("relation") == "supported-by" or (
-                    edge.get("relation") == "on"
-                    and mode.startswith("preserve-relative")
-                )
                 if partial_support:
                     edge["physics_role"] = "kinematic"
                 elif edge.get("type") == "fixed" or edge.get("relation") in {
@@ -368,8 +752,8 @@ def place_to_ground(
                     edge["physics_role"] = "dynamic"
             if "collision_policy" not in edge:
                 edge["collision_policy"] = (
-                    "support-lineage-only"
-                    if edge["physics_role"] == "kinematic"
+                    "kinematic-isolated"
+                    if edge["physics_role"] == "kinematic" and partial_support
                     else "default"
                 )
             record["support_mode"] = edge["support_mode"]

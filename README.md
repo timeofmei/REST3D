@@ -56,9 +56,11 @@ Follow the steps below to reconstruct a physically stable 3D scene from a single
 
 ```bash
 conda activate rest3d
-bash 1_infer_scenecanon.sh #Change `INPUT` to your image path (defaults to the demo image)
+bash 1_infer_scenecanon.sh \
+  --input data/xxx.png \
+  --output-dir output/runxxx
 ```
-Outputs are saved to `output/<image_name>/stage2/scene_canon/`.
+Outputs are saved to `output/runxxx/stage2/scene_canon/`.
 
 **Step 2. Stabilize the scene**
 
@@ -67,15 +69,13 @@ Choose either backend:
 ```bash
 # Original backend
 conda activate gym
-bash 2_stable_scene.sh --backend isaac-gym
+bash 2_stable_scene.sh --backend isaac-gym --output-dir output/runxxx
 
 # Isaac Lab backend (GPU PhysX + GPU tensor pipeline)
 conda activate isaaclab
-bash 2_stable_scene.sh --backend isaac-lab
+bash 2_stable_scene.sh --backend isaac-lab --output-dir output/runxxx
 ```
-Outputs are saved to `output/<image_name>/stage3/`:
-- `global_scene/` — physically stable scene
-- `global_scene_w_walls/` — (optional) additionally fits walls to the scene and adjusts wall-attached object positions accordingly
+Outputs are saved to `output/runxxx/stage3/`
 
 **🤗 Visualize and interact with the physically stable scene**
 
@@ -86,7 +86,9 @@ never overwritten:
 conda activate isaaclab
 bash 3_replay_in_simulator.sh \
   --backend isaac-lab \
-  --replay-output-dir output/isaaclab_migration/NEW_REPLAY_OUTPUT \
+  --output-dir output/runxxx \
+  --replay-output-dir output/runxxx/replay_v1 \
+  --require-stable \
   --viser
 ```
 

@@ -835,10 +835,12 @@ def _pick_most_floor_like(seg_obj_dir, image_rgb):
 
 
 def dedup_seg_masks(seg_obj_dir, agent_output_dir, img_output_dir, image_stem, llm_name,
-                    iou_thresh=0.3, overlap_thresh=0.8):
+                    iou_thresh=0.3, overlap_thresh=0.8,
+                    containment_min_area_ratio=0.25):
     """
     Pairwise-deduplicate masks inside segemented_obj/:
-    - if one side is the_floor, keep the_floor and drop the other;
+    - keep semantically distinct small masks nested inside larger objects;
+    - if one side is the_floor, keep both and warn;
     - otherwise keep the alphabetically-earlier filename.
     """
     seg_files = sorted(glob(os.path.join(seg_obj_dir, "*.png")))
@@ -880,7 +882,12 @@ def dedup_seg_masks(seg_obj_dir, agent_output_dir, img_output_dir, image_stem, l
             iou = intersection / union
             overlap_a = intersection / ma.sum()
             overlap_b = intersection / mb.sum()
-            if iou > iou_thresh or max(overlap_a, overlap_b) > overlap_thresh:
+            area_ratio = min(ma.sum(), mb.sum()) / max(ma.sum(), mb.sum())
+            duplicate = iou > iou_thresh or (
+                max(overlap_a, overlap_b) > overlap_thresh
+                and area_ratio >= containment_min_area_ratio
+            )
+            if duplicate:
                 # If one is the floor, it is likely the copy-fallback case: warn but do not delete
                 if is_floor(a) != is_floor(b):
                     floor_name = a if is_floor(a) else b

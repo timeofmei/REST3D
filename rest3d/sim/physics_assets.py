@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -11,6 +13,20 @@ from typing import Tuple, Union
 import numpy as np
 
 from rest3d.utils.mesh import load_trimesh_any
+
+
+def sanitize_urdf_name(name: str) -> str:
+    """Return a name usable as a USD SdfPath identifier (``[A-Za-z0-9_]`` only).
+
+    USD identifiers cannot contain characters such as ``-``; the URDF importer
+    fails to build prims from such names, so URDF robot/link names and mesh
+    filename stems must be sanitized before conversion.
+    """
+
+    sanitized = re.sub(r"[^A-Za-z0-9_]", "_", name)
+    if not sanitized:
+        raise ValueError(f"name cannot be sanitized to a valid USD identifier: {name!r}")
+    return sanitized
 
 
 @dataclass(frozen=True)
@@ -211,8 +227,23 @@ def write_physics_urdf(
         raise FileExistsError("refusing to overwrite derived URDF: %s" % output)
     source_mesh = Path(mesh_path).expanduser().resolve(strict=True)
     mesh_reference = os.path.relpath(str(source_mesh), str(output.parent))
+    if sanitize_urdf_name(source_mesh.stem) != source_mesh.stem:
+        # USD SdfPaths cannot represent the mesh filename stem, so the URDF
+        # importer would fail to build the mesh prim.  Reference a sanitized
+        # copy instead of touching the read-only source directory.
+        mesh_copy_dir = output.parent / "meshes"
+        mesh_copy_dir.mkdir(parents=True, exist_ok=True)
+        mesh_copy = mesh_copy_dir / (
+            sanitize_urdf_name(source_mesh.stem) + source_mesh.suffix
+        )
+        if mesh_copy.exists():
+            raise FileExistsError(
+                "refusing to overwrite sanitized mesh copy: %s" % mesh_copy
+            )
+        shutil.copyfile(source_mesh, mesh_copy)
+        mesh_reference = os.path.relpath(str(mesh_copy), str(output.parent))
 
-    robot = ET.Element("robot", {"name": robot_name})
+    robot = ET.Element("robot", {"name": sanitize_urdf_name(robot_name)})
     link = ET.SubElement(robot, "link", {"name": "base"})
     for section_name in ("visual", "collision"):
         section = ET.SubElement(link, section_name)

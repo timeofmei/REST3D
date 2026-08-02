@@ -198,5 +198,31 @@ class Stage1CacheTests(unittest.TestCase):
         self.assertIs(original_service.call_args.kwargs["sam3_processor"], fake_processor)
 
 
+class Stage1MaskDedupTests(unittest.TestCase):
+    def test_small_nested_mask_is_not_removed_as_duplicate(self):
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            mask_dir = root / "segemented_obj"
+            agent_dir = root / "segment_agent_out"
+            mask_dir.mkdir()
+            agent_dir.mkdir()
+
+            person = np.zeros((32, 32), dtype=np.uint8)
+            person[4:28, 4:28] = 255
+            eyeglasses = np.zeros((32, 32), dtype=np.uint8)
+            eyeglasses[8:12, 12:20] = 255
+            Image.fromarray(person).save(mask_dir / "person_000.png")
+            Image.fromarray(eyeglasses).save(mask_dir / "eyeglasses_000.png")
+
+            stage1.dedup_seg_masks(
+                str(mask_dir), str(agent_dir), str(root), "image", "gemini"
+            )
+
+            self.assertTrue((mask_dir / "person_000.png").is_file())
+            self.assertTrue((mask_dir / "eyeglasses_000.png").is_file())
+
+
 if __name__ == "__main__":
     unittest.main()
