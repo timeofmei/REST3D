@@ -32,6 +32,10 @@ These instructions apply to the entire repository.
 ## Git policy
 
 - Unless the user explicitly asks for a commit, do not commit any changes.
+- Never use a fast-forward merge or `--ff-only` when merging one branch into
+  another. Use `git merge --no-ff` to create an explicit merge commit and
+  preserve the visible branch topology, unless the user explicitly requests a
+  different merge strategy.
 - When the user explicitly requests a commit, write a detailed commit message
   in English. Use a concise English subject and an English body that explains
   the motivation, the important implementation details, and the verification
