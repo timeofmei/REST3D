@@ -286,7 +286,7 @@ def _dominant_face_direction(mesh, min_area_fraction=0.12, merge_cos=0.94):
     return best_dir
 
 
-def _robust_up_direction(mesh, axes, y_axis, side_surface_cos=0.5):
+def _robust_up_direction(mesh, axes, y_axis):
     """Estimate the object's up direction from its own geometry.
 
     The OBB axes returned by the reconstruction are reliable as a basis, but
@@ -295,23 +295,14 @@ def _robust_up_direction(mesh, axes, y_axis, side_surface_cos=0.5):
     picks a horizontal axis for objects with a dominant flat top (tables,
     shoes, boards).  Prefer the area-weighted dominant face normal; fall back
     to the OBB-y heuristic for objects without a dominant flat region.
-
-    In the scene-upright (coarse-aligned) frame the two cases are told apart
-    by the dominant plane's inclination: a horizontal top surface points
-    nearly straight up, while a *side* surface (e.g. a seated person's back)
-    is the largest flat region of some objects yet is nearly horizontal, so a
-    dominant direction far from the vertical must not be rotated to become
-    the up axis.
     """
     direction = _dominant_face_direction(mesh)
-    if direction is not None and direction @ y_axis < 0.0:
+    if direction is None:
+        dots = np.abs(np.asarray(axes, dtype=np.float64).T @ y_axis)
+        direction = axes[:, int(np.argmax(dots))]
+    if direction @ y_axis < 0.0:
         direction = -direction
-    if direction is not None and abs(float(direction @ y_axis)) >= side_surface_cos:
-        return direction
-    # no dominant plane, or the dominant plane is a side surface: rely on the
-    # OBB axis closest to the (scene-upright) frame's y
-    dots = np.abs(np.asarray(axes, dtype=np.float64).T @ y_axis)
-    return axes[:, int(np.argmax(dots))]
+    return direction / (np.linalg.norm(direction) + 1e-12)
 
 
 def get_scene_up_axis_from_ref_axes(axes_ref, meshes_ref=None, y_axis=np.array([0.0, 1.0, 0.0]), weighted=True, eps=1e-12):
