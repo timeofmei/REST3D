@@ -17,6 +17,10 @@ from types import SimpleNamespace
 import numpy as np
 
 from isaaclab.app import AppLauncher
+from rest3d.config.stable_scene_cfg import StableSceneCfg
+
+
+AUTHOR_DEFAULTS = StableSceneCfg()
 
 
 def _parse_args():
@@ -25,10 +29,18 @@ def _parse_args():
     parser.add_argument("--global-entities", type=Path, required=True)
     parser.add_argument("--initial-states", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--num-envs", type=int, default=16)
-    parser.add_argument("--cem-iters", type=int, default=2)
-    parser.add_argument("--settle-steps", type=int, default=60)
-    parser.add_argument("--early-steps", type=int, default=15)
+    parser.add_argument(
+        "--num-envs", type=int, default=AUTHOR_DEFAULTS.cem_pop_size
+    )
+    parser.add_argument(
+        "--cem-iters", type=int, default=AUTHOR_DEFAULTS.cem_iters_joint
+    )
+    parser.add_argument(
+        "--settle-steps", type=int, default=AUTHOR_DEFAULTS.total_settle_steps
+    )
+    parser.add_argument(
+        "--early-steps", type=int, default=AUTHOR_DEFAULTS.vel_settle_steps
+    )
     parser.add_argument("--seed", type=int, default=53)
     parser.add_argument("--physics-dt", type=float, default=1.0 / 60.0)
     parser.add_argument("--translation-std-m", type=float, default=0.02)
@@ -146,6 +158,7 @@ from rest3d.sim.local_cem import (  # noqa: E402
     quaternion_multiply_wxyz,
     quaternion_rotate_wxyz,
 )
+from rest3d.sim.physx_capacity import gpu_rigid_patch_capacity  # noqa: E402
 from rest3d.sim.replay_scene import (  # noqa: E402
     LAB_TO_REST_QUAT_WXYZ,
     LAB_TO_REST_ROTATION,
@@ -395,6 +408,13 @@ def _load_convex_hulls():
 
 
 def _maximum_entity_relative_pose_errors(reference_states, candidates):
+    # This is an invariant check, not part of the PhysX tensor pipeline.  In
+    # float32, an otherwise identical quaternion dot product can round to the
+    # next value below one; 2*acos then reports about 6.9e-4 rad.  Promote the
+    # small diagnostic calculation so the 1e-4-rad gate measures actual pose
+    # drift instead of float32 acos quantization.
+    reference_states = reference_states.to(dtype=torch.float64)
+    candidates = candidates.to(dtype=torch.float64)
     index_by_name = {name: index for index, name in enumerate(ALL_NAMES)}
     maximum_position = torch.zeros(
         (), device=candidates.device, dtype=candidates.dtype
@@ -480,8 +500,17 @@ def _run():
     np.random.seed(ARGS.seed)
     total_started = time.perf_counter()
     torch.cuda.reset_peak_memory_stats()
+    rigid_patch_capacity = gpu_rigid_patch_capacity(
+        ARGS.num_envs, len(ALL_NAMES)
+    )
     sim = SimulationContext(
-        sim_utils.SimulationCfg(dt=ARGS.physics_dt, device=ARGS.device)
+        sim_utils.SimulationCfg(
+            dt=ARGS.physics_dt,
+            device=ARGS.device,
+            physx=sim_utils.PhysxCfg(
+                gpu_max_rigid_patch_count=rigid_patch_capacity
+            ),
+        )
     )
     physics_context = sim._physics_context
     scene = InteractiveScene(_scene_cfg())
@@ -744,6 +773,13 @@ def _run():
 
     torch.cuda.synchronize()
     simulation_seconds = time.perf_counter() - simulation_started
+    kit_log_path = ARGS.output_dir / "kit.log"
+    kit_log_text = (
+        kit_log_path.read_text(encoding="utf-8", errors="replace")
+        if kit_log_path.is_file()
+        else ""
+    )
+    patch_buffer_overflowed = "Patch buffer overflow detected" in kit_log_text
     if last_state is None or last_force is None:
         raise RuntimeError("global CEM produced no simulation state")
     if (
@@ -801,6 +837,7 @@ def _run():
             and (torch.linalg.eigvalsh(actual_inertias) > 0.0).all()
         ),
         "contact_capacity_not_saturated": not contact_capacity_saturated,
+        "physx_patch_buffer_not_overflowed": not patch_buffer_overflowed,
         "fixed_objects_remained_kinematic": (
             maximum_fixed_position_error < 1.0e-5
             and maximum_fixed_rotation_error < 1.0e-5
@@ -961,6 +998,8 @@ def _run():
             else None,
             "cuda_probe_value": cuda_probe_value,
             "collision_approximation": ARGS.collision_approximation,
+            "gpu_max_rigid_patch_count": rigid_patch_capacity,
+            "physx_patch_buffer_overflowed": patch_buffer_overflowed,
             "maximum_hierarchy_relative_position_error_m": (
                 maximum_relative_position_error
             ),

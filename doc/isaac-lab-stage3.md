@@ -14,6 +14,7 @@ Stage 3。迁移的设计和逐阶段证据见
 | Python | `3.11.15` |
 | PyTorch | `2.7.0+cu128` |
 | CUDA runtime / NVRTC | `12.8 / 12.8` |
+| Viser / WebSockets | `0.2.11 / 12.0` |
 | GPU / driver | RTX 5090 D v2，compute capability 12.0；实测驱动 `591.86` |
 | 主机 | WSL2，headless 物理模式 |
 
@@ -79,7 +80,8 @@ bash 3_replay_in_simulator.sh \
   --backend isaac-lab \
   --replay-output-dir output/isaaclab_migration/NEW_FINAL_REPLAY \
   --settle-steps 120 \
-  --require-stable
+  --require-stable \
+  --viser
 ```
 
 Isaac Lab 入口会自动读取 `stage3/physics_assets/urdf_files/` 和
@@ -87,6 +89,26 @@ Isaac Lab 入口会自动读取 `stage3/physics_assets/urdf_files/` 和
 判断：位移超过 `0.1 m` 或旋转超过 `0.1 rad` 即不稳定。`replay_results.json` 中的
 `scene_stable`、`stable_object_count`、`unstable_object_names` 和 `objects` 是最终
 判断依据。
+
+`--viser` 会在物理完成并保存 `replay_states_rest.npy` 后，使用独立浏览器前端显示
+真实轨迹。打开 `http://localhost:8080`，右上角采用原作者的 `Frame`、`FPS`、
+`▶ Play` 三项 replay 控件；播放到末帧后会回到第 0 帧并自动停止。关闭时在启动命令
+的终端按 `Ctrl-C`。Viser 进程只读取
+OBJ、结果 JSON 和轨迹，不导入 Isaac Gym，也不会重新计算或改变 Isaac Lab 物理。
+
+已经完成 replay 时无需再次运行物理，可直接查看现有目录：
+
+```bash
+bash scripts/run_viser_replay.sh \
+  output/isaaclab_migration/EXISTING_REPLAY \
+  --port 8080 --fps 30
+```
+
+wrapper 优先使用当前环境，然后查找独立 `isaaclab` 环境。这里固定使用 Viser
+`0.2.11`：它是最后一个允许 Isaac Sim 5.1 强制要求的 `websockets==12.0` 的版本；
+Viser `0.2.12` 及以后要求 `websockets>=13.1`，不能装入该 Isaac Lab 基线。安装时还
+必须锁住 NumPy 和 typing-extensions，精确命令见独立环境安装说明。其他兼容的独立
+Python 可用 `VISER_PYTHON=/path/to/python` 显式选择；不要让 pip 自动升级这些核心包。
 
 ### 旧 Isaac Gym 回归
 
@@ -142,6 +164,17 @@ bash scripts/run_stage3_backend_comparison.sh \
   --steps 120 --early-step 15 --evaluation-step 60
 ```
 
+`2_stable_scene.sh --backend isaac-lab` 的正式默认搜索规模与原作者
+`StableSceneCfg` 一致，为局部/全局各 2048 个并行候选、15 次迭代。上面的 64 环境命令
+是显式的小规模开发检查，不是正式默认值。2048 环境下全场景 convex decomposition
+会超过 Isaac Lab 默认的 GPU PhysX rigid-patch 容量；后端现在按环境数和每环境刚体数
+自动使用通用的 2 次幂容量，并把容量及是否发生 overflow 写入结果门禁。
+
+在 RTX 5090/WSL 上完成的 2048×15 六对象完整 `重跑2` 结果位于
+`output/isaaclab_migration/cam22_highspec_2048x15_v2`：局部和全局均通过，全局
+state/contact tensor 均为 `cuda:0`，GPU PhysX patch 容量为 262144，日志中没有 PhysX
+error，峰值显存 13862 MiB，总耗时 142.6 秒。
+
 局部/全局 runtime 的底层脚本也可独立调用，但需要物理资产、组计划和状态 JSON；
 正常使用优先选择 `2_stable_scene.sh` 或 `run_isaaclab_local_groups.sh`，避免手工拼接
 不一致的中间输入。
@@ -193,7 +226,8 @@ renderer、GLFW 或 X Server 不可用，因为 WSL 当前只能枚举 llvmpipe�
 不代表 PhysX 回退：必须以结果 JSON 中的 GPU simulation、GPU broadphase、CUDA
 state/contact tensor、`sm_120` 实算门禁为准。
 
-当前已验证的是 headless 物理链路，没有验证 Isaac Sim GUI、RTX 渲染、视频或交互
-viewer。若需要这些功能，应先在 NVIDIA 官方支持的原生 Linux/Windows 主机验证
-Vulkan/显示路径；不要为此直接修改驱动、系统 Vulkan、Docker daemon 或现有 Conda
-环境。
+当前已验证的是 headless 物理链路，没有验证 Isaac Sim GUI、RTX 渲染或相机视频。
+保存的物理轨迹可以由 Viser 浏览器交互查看；这不等同于 Isaac Sim renderer，也不
+依赖 Vulkan。若需要 RTX 画面或 Isaac Sim 原生 viewer，应先在 NVIDIA 官方支持的
+原生 Linux/Windows 主机验证 Vulkan/显示路径；不要为此直接修改驱动、系统 Vulkan、
+Docker daemon 或现有 Conda 环境。

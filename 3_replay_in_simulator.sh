@@ -15,6 +15,7 @@ REPLAY_OUTPUT_DIR=""
 BACKEND="isaac-gym"
 SETTLE_STEPS=120
 REQUIRE_STABLE=false
+VISER=false
 
 usage() {
     cat <<'EOF'
@@ -28,6 +29,7 @@ Options:
   --backend NAME     isaac-gym (default) or isaac-lab
   --settle-steps N   Physics steps (default: 120)
   --require-stable   Fail unless every object passes the 60-frame stability gate
+  --viser            Open the saved replay in a browser after physics completes
   -h, --help         Show this help
 EOF
 }
@@ -61,6 +63,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --require-stable)
             REQUIRE_STABLE=true
+            shift
+            ;;
+        --viser)
+            VISER=true
             shift
             ;;
         -h|--help)
@@ -120,9 +126,15 @@ if [[ "$BACKEND" == "isaac-lab" ]]; then
             --collision-approximation convex_decomposition
         )
     fi
-    exec bash scripts/run_isaaclab_replay.sh \
+    if [[ "$VISER" != true ]]; then
+        exec bash scripts/run_isaaclab_replay.sh \
+            "$SCENE_TREE" "$SCENE_DIR" "$REPLAY_OUTPUT_DIR" \
+            "${ISAACLAB_REPLAY_ARGS[@]}"
+    fi
+    bash scripts/run_isaaclab_replay.sh \
         "$SCENE_TREE" "$SCENE_DIR" "$REPLAY_OUTPUT_DIR" \
-        "${ISAACLAB_REPLAY_ARGS[@]}"
+        "${ISAACLAB_REPLAY_ARGS[@]}" || exit $?
+    exec bash scripts/run_viser_replay.sh "$REPLAY_OUTPUT_DIR"
 fi
 
 [[ -n "${CONDA_PREFIX:-}" ]] || {
@@ -139,7 +151,11 @@ ISAACGYM_DRIVER_LIB=""
 if [[ -d /usr/lib/wsl/lib ]]; then
     ISAACGYM_DRIVER_LIB="/usr/lib/wsl/lib"
 fi
-GYM_REPLAY_ARGS=(--settle_steps "$SETTLE_STEPS" --headless --no_save_video)
+if [[ "$VISER" == true ]]; then
+    GYM_REPLAY_ARGS=(--settle_steps "$SETTLE_STEPS" --viser)
+else
+    GYM_REPLAY_ARGS=(--settle_steps "$SETTLE_STEPS" --headless --no_save_video)
+fi
 if [[ "$REQUIRE_STABLE" == true ]]; then
     GYM_REPLAY_ARGS+=(--require-stable)
 fi

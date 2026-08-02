@@ -86,11 +86,13 @@ never overwritten:
 conda activate isaaclab
 bash 3_replay_in_simulator.sh \
   --backend isaac-lab \
-  --replay-output-dir output/isaaclab_migration/NEW_REPLAY_OUTPUT
+  --replay-output-dir output/isaaclab_migration/NEW_REPLAY_OUTPUT \
+  --viser
 ```
 
-The Isaac Lab path is currently validated in headless physics mode. The original
-Isaac Gym/viser path remains available for interactive inspection. See the
+Open `http://localhost:8080` after the physics replay completes. Isaac Lab physics
+still runs headless; Viser displays the saved simulator trajectory in the browser
+without depending on the unavailable WSL Vulkan renderer. See the
 [Stage 3 guide](doc/isaac-lab-stage3.md) for complete commands, output fields,
 WSL limitations, final stability validation, and backend regression.
 

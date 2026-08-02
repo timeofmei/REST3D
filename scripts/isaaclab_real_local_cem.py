@@ -17,6 +17,10 @@ from types import SimpleNamespace
 import numpy as np
 
 from isaaclab.app import AppLauncher
+from rest3d.config.stable_scene_cfg import StableSceneCfg
+
+
+AUTHOR_DEFAULTS = StableSceneCfg()
 
 
 def _parse_args():
@@ -30,10 +34,18 @@ def _parse_args():
     )
     parser.add_argument("--group-index", type=int, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--num-envs", type=int, default=16)
-    parser.add_argument("--cem-iters", type=int, default=2)
-    parser.add_argument("--settle-steps", type=int, default=60)
-    parser.add_argument("--early-steps", type=int, default=15)
+    parser.add_argument(
+        "--num-envs", type=int, default=AUTHOR_DEFAULTS.cem_pop_size
+    )
+    parser.add_argument(
+        "--cem-iters", type=int, default=AUTHOR_DEFAULTS.cem_iters_subtree
+    )
+    parser.add_argument(
+        "--settle-steps", type=int, default=AUTHOR_DEFAULTS.total_settle_steps
+    )
+    parser.add_argument(
+        "--early-steps", type=int, default=AUTHOR_DEFAULTS.vel_settle_steps
+    )
     parser.add_argument("--seed", type=int, default=23)
     parser.add_argument("--physics-dt", type=float, default=1.0 / 60.0)
     parser.add_argument("--translation-std-m", type=float, default=0.03)

@@ -11,6 +11,7 @@ import sys
 import time
 from pathlib import Path
 
+from rest3d.config.stable_scene_cfg import StableSceneCfg
 from rest3d.sim.local_results import (
     legacy_local_group_payload,
     local_group_execution_order,
@@ -20,14 +21,25 @@ from rest3d.sim.local_results import (
 )
 
 
+AUTHOR_DEFAULTS = StableSceneCfg()
+
+
 def _parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scene-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--num-envs", type=int, default=64)
-    parser.add_argument("--cem-iters", type=int, default=15)
-    parser.add_argument("--settle-steps", type=int, default=60)
-    parser.add_argument("--early-steps", type=int, default=15)
+    parser.add_argument(
+        "--num-envs", type=int, default=AUTHOR_DEFAULTS.cem_pop_size
+    )
+    parser.add_argument(
+        "--cem-iters", type=int, default=AUTHOR_DEFAULTS.cem_iters_subtree
+    )
+    parser.add_argument(
+        "--settle-steps", type=int, default=AUTHOR_DEFAULTS.total_settle_steps
+    )
+    parser.add_argument(
+        "--early-steps", type=int, default=AUTHOR_DEFAULTS.vel_settle_steps
+    )
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--interaction-margin-m", type=float, default=0.15)
     parser.add_argument("--ground-clearance-m", type=float, default=0.002)

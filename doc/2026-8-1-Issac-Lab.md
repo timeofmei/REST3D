@@ -1175,6 +1175,25 @@ GPU PhysX + GPU tensor，公共全对象能量运行在 `cuda:0`。回归总计 
 CPU tensor pipeline 门禁通过。该回归只验证旧入口兼容，不把旧未优化场景的稳定性
 作为 G 的通过条件。
 
+#### G 后续：Viser 浏览器 replay
+
+WSL 的 Vulkan/RTX renderer 仍不可用，但 Isaac Lab 保存的公共 Y-up WXYZ 轨迹现在可
+由独立 Viser 浏览器前端直接播放。`3_replay_in_simulator.sh --backend isaac-lab
+--viser` 会先完成真实 GPU 物理和结果落盘，再读取 `replay_states_rest.npy`；已经完成
+的 replay 可直接交给 `scripts/run_viser_replay.sh`，无需重新仿真。播放器严格核对
+scene tree、对象顺序、OBJ/URDF 映射、`[frames, objects, 13]` shape、有限值和四元数，
+并还原原作者的 `Frame`、`FPS`、`▶ Play` 三项 replay 控件；播放到末帧后回到
+第 0 帧并自动停止。
+
+Isaac Sim 5.1 强制 `websockets==12.0`，而 Viser `0.2.12` 起要求
+`websockets>=13.1`；因此专用 `isaaclab` 环境固定 Viser `0.2.11`，并同时锁住 NumPy
+`1.26.0` 和 typing-extensions `4.12.2`。安装后重新运行真实 GPU smoke，结果保留在
+`smoke_after_viser_0_2_11_v1`，GPU PhysX、GPU pipeline、GPU broadphase、CUDA state
+tensor、`sm_120` 和 CUDA 运算全部通过。顶层 `--viser` 的完整三对象物理→浏览器
+集成结果保留在 `viser_top_level_integration_v1`：61 帧、3/3 稳定，网页返回 HTTP
+200。实际六对象 `cam22_manual_replay_20260802_v1` 的 121 帧和 6/6 网格也全部加载。
+加入 2048 环境 PhysX patch 容量策略测试后，仓库纯逻辑回归更新为 `58 passed`。
+
 ## 7. 分阶段门禁与验证矩阵
 
 | 阶段 | 最小验证 | 进入下一阶段的条件 |

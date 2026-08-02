@@ -49,6 +49,7 @@ from .physics_assets import (
     analyze_physics_asset,
     write_physics_urdf,
 )
+from .physx_capacity import gpu_rigid_patch_capacity
 
 __all__ = [
     "ReplayObjectSpec",
@@ -78,6 +79,7 @@ __all__ = [
     "evaluate_local_cem_energy",
     "evaluate_global_cem_energy",
     "evaluate_replay_stability",
+    "gpu_rigid_patch_capacity",
     "lab_states_to_rest",
     "load_replay_scene",
     "rest_poses_to_lab",

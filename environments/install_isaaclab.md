@@ -14,7 +14,7 @@ environments. The tested A–G baseline is:
 The installed package metadata reports `isaaclab==0.54.2`; the authoritative
 Isaac Lab source identity for this editable install is the `v2.3.2` Git tag and
 commit above. Other observed transitive versions include NumPy `1.26.0`, trimesh
-`4.5.1`, and `warp-lang==1.15.0`.
+`4.5.1`, `warp-lang==1.15.0`, WebSockets `12.0`, and Viser `0.2.11`.
 
 The version pair follows the official
 [Isaac Lab dependency table](https://github.com/isaac-sim/IsaacLab#isaac-sim-version-dependency)
@@ -45,6 +45,13 @@ pip install flatdict==4.0.1 --no-build-isolation
 git clone --branch v2.3.2 --depth 1 \
   https://github.com/isaac-sim/IsaacLab.git /home/yangyankun/IsaacLab-2.3.2
 pip install -e /home/yangyankun/IsaacLab-2.3.2/source/isaaclab
+
+# Browser replay without the unavailable WSL Vulkan renderer. Keep every
+# compatibility pin: newer Viser requires an incompatible WebSockets version,
+# while unconstrained Viser 0.2.11 resolution attempts to upgrade NumPy.
+pip install \
+  viser==0.2.11 numpy==1.26.0 websockets==12.0 \
+  typing_extensions==4.12.2
 ```
 
 The Isaac Lab package metadata pins Starlette 0.49.1, while Isaac Sim 5.1 pins
@@ -52,6 +59,13 @@ FastAPI 0.115.7, whose metadata requires Starlette below 0.46. These exact
 upstream constraints have no intersection, so `pip check` reports that one
 known conflict. Phase A does not use the FastAPI path; the actual Kit launch,
 CUDA PhysX step, CUDA state tensor, and PyTorch CUDA operation were tested.
+
+Isaac Sim 5.1 also pins `websockets==12.0`. Viser `0.2.11` is the final release
+whose metadata accepts that version (`websockets>=10.4`); Viser `0.2.12` and
+newer require `websockets>=13.1`. Do not install a current Viser release into
+this environment and do not omit the NumPy constraint above. The browser viewer
+does not import Isaac Sim, but keeping these versions compatible prevents its
+installation from changing the validated physics environment.
 
 ## WSL process environment
 

@@ -26,11 +26,11 @@ Options:
   --backend NAME     isaac-gym (default) or isaac-lab
   --local-groups-only
                      Stop Isaac Lab after local CEM instead of continuing to global CEM
-  --cem-pop-size N   Override parallel candidate environments
+  --cem-pop-size N   Override parallel candidate environments (default: 2048)
   --cem-iters-subtree N
-                     Override local CEM iterations
+                     Override local CEM iterations (default: 15)
   --cem-iters-joint N
-                     Override global CEM iterations
+                     Override global CEM iterations (default: 15)
   --cem-seed N       Fix the local CEM random seed
   --total-settle-steps N
   --vel-settle-steps N
