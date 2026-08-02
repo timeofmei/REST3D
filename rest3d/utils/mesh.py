@@ -201,15 +201,8 @@ def align_bbox_to_y_up_from_axes(mesh, bbox, axes, y_axis=np.array([0.0, 1.0, 0.
     """
     axes = np.asarray(axes, dtype=np.float64)  # (3,3)
 
-    # choose which provided axis is "up" (closest to world y)
-    dots = np.abs(axes.T @ y_axis)     # (3,)
-    up_axis_idx = int(np.argmax(dots))
-    up_axis = axes[:, up_axis_idx]
-
-    # make it point upward
-    if np.dot(up_axis, y_axis) < 0:
-        up_axis = -up_axis
-        axes[:, up_axis_idx] = up_axis
+    # choose which provided axis is "up"
+    up_axis = _robust_up_direction(mesh, axes, y_axis)
 
     # rotate up_axis -> y_axis
     rotation_to_y = rotation_matrix_from_vectors(up_axis, y_axis)
@@ -222,6 +215,94 @@ def align_bbox_to_y_up_from_axes(mesh, bbox, axes, y_axis=np.array([0.0, 1.0, 0.
     axes = rotation_to_y @ axes 
 
     return mesh, bbox, axes
+
+
+def _dominant_face_direction(mesh, min_area_fraction=0.12, merge_cos=0.94):
+    """Area-weighted normal of the mesh's largest flat region, or None.
+
+    Returns None when no single flat region covers enough of the surface
+    (e.g. spheres or heavily curved objects).
+    """
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    if len(faces) == 0:
+        return None
+    triangles = vertices[faces]
+    cross = np.cross(
+        triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]
+    )
+    lengths = np.linalg.norm(cross, axis=1)
+    lengths[lengths == 0.0] = 1.0
+    normals = cross / lengths[:, None]
+    areas = 0.5 * lengths
+    total = float(areas.sum())
+    if total <= 0.0:
+        return None
+
+    # Quantize directions into clusters and accumulate their areas (O(F)).
+    rounded = np.round(normals, 1)
+    _, inverse = np.unique(rounded, axis=0, return_inverse=True)
+    cluster_area = np.bincount(inverse, weights=areas)
+    cluster_sum = np.stack(
+        [
+            np.bincount(inverse, weights=normals[:, 0]),
+            np.bincount(inverse, weights=normals[:, 1]),
+            np.bincount(inverse, weights=normals[:, 2]),
+        ],
+        axis=1,
+    )
+    cluster_norm = np.linalg.norm(cluster_sum, axis=1)
+    cluster_norm[cluster_norm == 0.0] = 1.0
+    cluster_dir = cluster_sum / cluster_norm[:, None]
+
+    # Greedily merge nearby clusters into the largest flat region.
+    used = np.zeros(len(cluster_area), dtype=bool)
+    best_area = 0.0
+    best_dir = None
+    while True:
+        available = np.where(~used)[0]
+        if len(available) == 0:
+            break
+        seed = available[int(np.argmax(cluster_area[available]))]
+        used[seed] = True
+        region_area = cluster_area[seed]
+        region_dir = cluster_dir[seed].copy()
+        while True:
+            candidates = np.where(
+                ~used & (np.abs(cluster_dir @ region_dir) >= merge_cos)
+            )[0]
+            if len(candidates) == 0:
+                break
+            pick = candidates[int(np.argmax(cluster_area[candidates]))]
+            used[pick] = True
+            region_area = region_area + cluster_area[pick]
+            region_dir = region_dir * region_area + cluster_dir[pick] * cluster_area[pick]
+            region_dir = region_dir / (np.linalg.norm(region_dir) + 1e-12)
+        if region_area > best_area:
+            best_area = region_area
+            best_dir = region_dir
+    if best_dir is None or best_area / total < min_area_fraction:
+        return None
+    return best_dir
+
+
+def _robust_up_direction(mesh, axes, y_axis):
+    """Estimate the object's up direction from its own geometry.
+
+    The OBB axes returned by the reconstruction are reliable as a basis, but
+    selecting the up axis as the one closest to the *current* frame's y is not:
+    the reconstruction frame is camera-relative, so the heuristic regularly
+    picks a horizontal axis for objects with a dominant flat top (tables,
+    shoes, boards).  Prefer the area-weighted dominant face normal; fall back
+    to the OBB-y heuristic for objects without a dominant flat region.
+    """
+    direction = _dominant_face_direction(mesh)
+    if direction is None:
+        dots = np.abs(np.asarray(axes, dtype=np.float64).T @ y_axis)
+        direction = axes[:, int(np.argmax(dots))]
+    if direction @ y_axis < 0.0:
+        direction = -direction
+    return direction / (np.linalg.norm(direction) + 1e-12)
 
 
 def get_scene_up_axis_from_ref_axes(axes_ref, meshes_ref=None, y_axis=np.array([0.0, 1.0, 0.0]), weighted=True, eps=1e-12):
@@ -244,10 +325,15 @@ def get_scene_up_axis_from_ref_axes(axes_ref, meshes_ref=None, y_axis=np.array([
     for i, A in enumerate(axes_ref):
         A = np.asarray(A, dtype=np.float64)
 
-        # pick axis most aligned with world y
-        dots = np.abs(A.T @ y_axis)          # (3,)
-        up_idx = int(np.argmax(dots))
-        up = A[:, up_idx]
+        # prefer the mesh's own dominant flat region over the camera-relative
+        # OBB-y proximity heuristic (see _robust_up_direction)
+        up = None
+        if meshes_ref is not None and i < len(meshes_ref):
+            up = _dominant_face_direction(meshes_ref[i])
+        if up is None:
+            dots = np.abs(A.T @ y_axis)          # (3,)
+            up_idx = int(np.argmax(dots))
+            up = A[:, up_idx]
 
         # align sign to +y
         if np.dot(up, y_axis) < 0:
