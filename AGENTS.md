@@ -26,6 +26,9 @@ These instructions apply to the entire repository.
 - Use the `rest3d` Conda environment for scene understanding and reconstruction
   (Stages 1 and 2). It uses Python 3.11, PyTorch with CUDA 12.8, and must support
   the RTX 5090 (`sm_120`).
+- The Gemini VLM API key used by Stage 1 lives in the repository-local `.env`
+  file; load it with `set -a; source .env; set +a` before running `1_infer_scenecanon.sh`.
+  This is a local-repository-specific loading convention.
 - Use the `gym` Conda environment for Isaac Gym Stage 3 stabilization,
   optimization, and replay. Isaac Gym Preview 4 uses Python 3.8 and an older
   PyTorch build; on RTX 5090 it must use GPU PhysX with the CPU tensor pipeline
@@ -33,6 +36,15 @@ These instructions apply to the entire repository.
 - Do not persist the `gym` environment's library directory in
   `LD_LIBRARY_PATH`. Scope the WSL driver path and `libpython3.8` preload to the
   Isaac Gym process so other shells and Conda environments are not polluted.
+
+## Command style
+
+- Always activate the target Conda environment with `conda activate <env>`
+  before running environment-specific commands. Do not invoke binaries via
+  absolute paths such as `~/miniconda3/envs/<env>/bin/python`.
+- Replay and replay visualization (`scripts/view_replay_viser.py`) must run in
+  the `gym` environment. Do not use or maintain compatibility with the
+  `isaaclab` environment's viser 0.2.11.
 
 ## Editing and verification
 
