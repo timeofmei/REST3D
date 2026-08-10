@@ -14,6 +14,10 @@ export REST3D_ROOT="$(pwd)"
 
 **3. Set up the `gym` environment** — follow [environments/install_gym.md](environments/install_gym.md)
 
+**3b. Set up the `mix3r` environment** (optional; mix3r Stage 2 object-mesh
+backend, alternative/parallel to SAM-3D-Objects) — follow
+[environments/install_mix3r.md](environments/install_mix3r.md)
+
 **4. Set your API key** (for the `rest3d` environment):
 ```bash
 # default Gemini backend
