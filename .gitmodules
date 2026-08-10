@@ -1,0 +1,3 @@
+[submodule "third_party/mix3r"]
+	path = third_party/mix3r
+	url = git@github.com:timeofmei/mix3r.git
