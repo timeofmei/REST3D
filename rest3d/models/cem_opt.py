@@ -549,7 +549,10 @@ class MultiEnvCEMPlacement:
         _n_actors = len(self.fixed_obj_names) + len(self.movable_obj_names)
         _n_actor_pairs = max(1, _n_actors * (_n_actors - 1) // 2)
         _n_envs = getattr(args, "cem_pop_size", 1024)
-        _pt = 64 if getattr(args, "vhacd_enabled", False) else 40
+        # 64 contacts/pair underestimates small dense meshes (16-hull VHACD on
+        # tabletop objects hit the PhysX contact buffer and crash the CUDA
+        # context); 128 keeps such scenes inside the buffer (~500 MB GPU).
+        _pt = 128 if getattr(args, "vhacd_enabled", False) else 40
         _est = _n_envs * _n_actor_pairs * _pt
         _floor = 512 * 1024
         _cap = 8 * 1024 * 1024
